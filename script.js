@@ -1783,10 +1783,11 @@ function detectLayoutPositional(sampleRows) {
  *  @param {object} meta          - { banco, tipo_cuenta, moneda }
  *  @param {string} tableName     - nombre de la tabla origen (ej. "Tabla 2023")
  *  @param {number} endRow        - última fila a procesar (exclusiva)
- *  @param {number|null} yearOverride - año de la tabla (detectado del título, o null)
+ *  @param {number|null} yearOverride    - año de la tabla (detectado del título, o null)
+ *  @param {string}      cuentaOverride  - número de cuenta detectado del título
  */
 function extractFromCols(rawRows, startRow, cols, sheetName, meta,
-                          tableName = '', endRow = null, yearOverride = null) {
+                          tableName = '', endRow = null, yearOverride = null, cuentaOverride = '') {
   const { colFecha, colIngreso, colEgreso, colDesc = -1, colTipo = -1,
           colFactura = -1, colConcepto = -1 } = cols;
   const limit  = endRow != null ? Math.min(endRow, rawRows.length) : rawRows.length;
@@ -1860,6 +1861,7 @@ function extractFromCols(rawRows, startRow, cols, sheetName, meta,
       monto,
       ingreso:            tipo_registro === 'Ingreso' ? monto : 0,
       egreso:             tipo_registro === 'Egreso'  ? monto : 0,
+      cuenta:             cuentaOverride || '',          // número de cuenta bancaria
       hoja:               sheetName,
       banco:              meta.banco,
       tipo_cuenta:        meta.tipo_cuenta,
@@ -1916,17 +1918,58 @@ function looksLikeDataTableHeader(row) {
   return hasFecha && (hasIng || hasEgr);
 }
 
-/** Busca un año (2020-2035) en las filas anteriores al header de tabla. */
-function extractTableYear(rawRows, headerRowIdx) {
-  for (let i = Math.max(0, headerRowIdx - 6); i < headerRowIdx; i++) {
+/**
+ * Extrae año Y número de cuenta de las filas de título sobre el header de tabla.
+ * Patrones buscados (hasta 8 filas hacia arriba):
+ *   - Año:   "2023", "Movimientos 2024", "Bancomer Cheques SMTO Pesos 2023"
+ *   - Cuenta: "Cuenta 0111095641", "Cta. 0110053627", "No. 00110053627"
+ * Si no encuentra año en los títulos, devuelve year: null → se infiere de las fechas.
+ * @returns {{ year: number|null, cuenta: string }}
+ */
+function extractTableMeta(rawRows, headerRowIdx) {
+  let year   = null;
+  let cuenta = '';
+
+  for (let i = Math.max(0, headerRowIdx - 8); i < headerRowIdx; i++) {
     const row = rawRows[i];
     if (!row) continue;
+
     for (const cell of row) {
-      const m = String(cell || '').match(/\b(202[0-9]|203[0-5])\b/);
-      if (m) return parseInt(m[1], 10);
+      const text = String(cell || '');
+
+      // ── Año ────────────────────────────────────────────────────
+      if (!year) {
+        const mYear = text.match(/\b(202[0-9]|203[0-5])\b/);
+        if (mYear) year = parseInt(mYear[1], 10);
+      }
+
+      // ── Cuenta bancaria ────────────────────────────────────────
+      // Formatos: "Cuenta 0111095641", "Cta 0111095641", "No. 0111095641",
+      //           "Cuenta No. 0111095641", valor solo de 8–16 dígitos seguido de fin de celda
+      if (!cuenta) {
+        const mCuenta = text.match(
+          /(?:cuenta|cta\.?|no\.?|número|numero|account)\s*(?:no\.?)?\s*[:.]?\s*([\d]{6,16})/i
+        );
+        if (mCuenta) {
+          cuenta = mCuenta[1];
+        } else {
+          // Celda que ES solo un número de cuenta (8-16 dígitos)
+          const mSolo = text.trim().match(/^(0[\d]{7,15})$/);
+          if (mSolo) cuenta = mSolo[1];
+        }
+      }
+
+      if (year && cuenta) break;
     }
+    if (year && cuenta) break;
   }
-  return null;
+
+  return { year, cuenta };
+}
+
+// Alias de compatibilidad (usado internamente si alguien llama extractTableYear)
+function extractTableYear(rawRows, headerRowIdx) {
+  return extractTableMeta(rawRows, headerRowIdx).year;
 }
 
 /**
@@ -1974,7 +2017,7 @@ function detectTablesInSheet(rawRows) {
 
       let colFactura = findCol(HDR_FACTURA);
 
-      const yearDetected = extractTableYear(rawRows, i);
+      const { year: yearDetected, cuenta: cuentaDetected } = extractTableMeta(rawRows, i);
       const headerRowIdx = i;
       const dataStartIdx = i + 1;
 
@@ -1997,18 +2040,25 @@ function detectTablesInSheet(rawRows) {
         }
       }
 
+      // tableName incluye año y cuenta si están disponibles
+      let tableName = `Tabla ${tables.length + 1}`;
+      if (yearDetected && cuentaDetected) tableName = `${yearDetected} · ${cuentaDetected}`;
+      else if (yearDetected)              tableName = `${yearDetected}`;
+      else if (cuentaDetected)            tableName = `Cuenta ${cuentaDetected}`;
+
       tables.push({
         headerRowIdx,
         dataStartIdx,
         dataEndIdx,
         yearDetected,
+        cuentaDetected,
         colFecha,
         colDesc,
         colFactura,
         colConcepto,
         colIngreso:  colIngreso >= 0 ? colIngreso : 5,
         colEgreso:   colEgreso  >= 0 ? colEgreso  : 6,
-        tableName:   yearDetected ? `Tabla ${yearDetected}` : `Tabla ${tables.length + 1}`,
+        tableName,
       });
 
       i = dataEndIdx;
@@ -2051,6 +2101,7 @@ function normalizeSheetRows(rawRows, sheetName, meta) {
         tbl.tableName,
         tbl.dataEndIdx,
         tbl.yearDetected,
+        tbl.cuentaDetected || '',   // ← número de cuenta detectado del título
       );
       allExtracted.push(...rows);
     }
@@ -2428,11 +2479,16 @@ function buildSheetDashboardHTML(sheetName, idx) {
     `<option value="${mi}">${m}</option>`
   ).join('');
 
+  // ── Cuentas únicas detectadas en esta hoja ──────────────────
+  const cuentas     = [...new Set(rows.map(r => r.cuenta).filter(Boolean))].sort();
+  const cuentaOpts  = cuentas.map(c => `<option value="${escHtml(c)}">Cuenta ${escHtml(c)}</option>`).join('');
+  const showCuenta  = cuentas.length > 0;
+
   return `
     <div class="sheet-dash-header">
       <div>
         <h3 class="sheet-dash-title">${escHtml(sheetName)}</h3>
-        <p class="sheet-dash-subtitle">${escHtml(meta.banco)} · ${escHtml(meta.tipo_cuenta)} · ${meta.moneda}${yearStr ? ' · ' + yearStr : ''}</p>
+        <p class="sheet-dash-subtitle">${escHtml(meta.banco)} · ${escHtml(meta.tipo_cuenta)} · ${meta.moneda}${yearStr ? ' · ' + yearStr : ''}${cuentas.length === 1 ? ' · Cta. ' + cuentas[0] : ''}</p>
       </div>
       <span class="table-badge" id="sheet-badge-${idx}">${rows.length.toLocaleString('es-MX')} movimientos</span>
     </div>
@@ -2450,6 +2506,12 @@ function buildSheetDashboardHTML(sheetName, idx) {
           <option value="all">Todos los meses</option>
           ${mesOpts}
         </select>
+        ${showCuenta ? `
+        <select class="sfb-select" id="sfb-cuenta-${idx}"
+          onchange="onSheetCuentaChange(${idx}, this.value)">
+          <option value="all">Todas las cuentas</option>
+          ${cuentaOpts}
+        </select>` : ''}
         <div class="sfb-quick-wrap">
           <button class="sfb-quick sfb-active" id="sfb-todos-${idx}"
             onclick="setSheetTipo(${idx}, 'all', this)">Ver todo</button>
@@ -2467,6 +2529,12 @@ function buildSheetDashboardHTML(sheetName, idx) {
             oninput="onSheetSearch(${idx}, this.value)">
         </div>
       </div>
+    </div>
+
+    <!-- ── Contexto activo de filtros ───────────────────────── -->
+    <div class="sfb-context-bar" id="sfb-ctx-${idx}">
+      <span class="sfb-ctx-icon">◎</span>
+      <span id="sfb-ctx-text-${idx}">Mostrando todos los registros</span>
     </div>
 
     <!-- ── KPIs dinámicos ────────────────────────────────────── -->
@@ -2540,7 +2608,7 @@ function buildSheetDashboardHTML(sheetName, idx) {
 function getSheetFilter2(sheetName) {
   if (!sheetFilters2[sheetName]) {
     sheetFilters2[sheetName] = {
-      year: 'all', mes: 'all', tipo: 'all',
+      year: 'all', mes: 'all', tipo: 'all', cuenta: 'all',
       search: '', sortCol: 'fecha', sortDir: 'desc',
     };
   }
@@ -2559,9 +2627,10 @@ function applySheetFilters2(sheetName, idx) {
   let rows   = processedData2[sheetName] || [];
 
   // ── Filtros globales ───────────────────────────────────────────
-  if (f.year !== 'all') rows = rows.filter(r => String(r.year) === String(f.year));
-  if (f.mes  !== 'all') rows = rows.filter(r => String(r.mes)  === String(f.mes));
-  if (f.tipo !== 'all') rows = rows.filter(r => r.tipo_registro === f.tipo);
+  if (f.year   !== 'all') rows = rows.filter(r => String(r.year)  === String(f.year));
+  if (f.mes    !== 'all') rows = rows.filter(r => String(r.mes)   === String(f.mes));
+  if (f.tipo   !== 'all') rows = rows.filter(r => r.tipo_registro === f.tipo);
+  if (f.cuenta !== 'all') rows = rows.filter(r => r.cuenta        === f.cuenta);
 
   // ── Búsqueda de texto ──────────────────────────────────────────
   if (f.search) {
@@ -2589,42 +2658,57 @@ function applySheetFilters2(sheetName, idx) {
   renderSheetKPIs2(sheetName, idx, rows);
   renderSheetTableBody2(sheetName, idx, rows);
   updateSortIcons2(idx, f);
+  updateContextBar2(idx, f);
 }
 
 /** Renderiza KPIs reactivos según las filas filtradas. */
 function renderSheetKPIs2(sheetName, idx, filteredRows) {
-  const totalRows = processedData2[sheetName] || [];
-  const ing  = filteredRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
-  const egr  = filteredRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
-  const bal  = ing - egr;
-  const nIng = filteredRows.filter(r => r.tipo_registro === 'Ingreso').length;
-  const nEgr = filteredRows.filter(r => r.tipo_registro === 'Egreso').length;
-  const nota = filteredRows.length < totalRows.length
+  const totalRows  = processedData2[sheetName] || [];
+  const f          = getSheetFilter2(sheetName);
+  const ing        = filteredRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
+  const egr        = filteredRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
+  const bal        = ing - egr;
+  const nIng       = filteredRows.filter(r => r.tipo_registro === 'Ingreso').length;
+  const nEgr       = filteredRows.filter(r => r.tipo_registro === 'Egreso').length;
+  const isFiltered = filteredRows.length < totalRows.length;
+  const nota       = isFiltered
     ? `de ${totalRows.length.toLocaleString('es-MX')} total`
     : 'total';
+
+  // Título de contexto en el 4º KPI
+  const contextParts = [];
+  if (f.year   !== 'all') contextParts.push(f.year);
+  if (f.cuenta !== 'all') contextParts.push(`Cta. ${f.cuenta}`);
+  const kpiDetail4 = contextParts.length ? contextParts.join(' · ') : nota;
 
   const kpisEl = document.getElementById(`sheet-kpis-${idx}`);
   if (!kpisEl) return;
   kpisEl.innerHTML = `
     <div class="kpi-card kpi-income">
-      <div class="kpi-label">Ingresos</div>
+      <div class="kpi-label">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+        Ingresos${f.year !== 'all' ? ' ' + f.year : ''}
+      </div>
       <div class="kpi-value">${formatMoney(ing)}</div>
       <div class="kpi-detail">${nIng.toLocaleString('es-MX')} movimientos</div>
     </div>
     <div class="kpi-card kpi-expense">
-      <div class="kpi-label">Egresos</div>
+      <div class="kpi-label">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+        Egresos${f.year !== 'all' ? ' ' + f.year : ''}
+      </div>
       <div class="kpi-value">${formatMoney(egr)}</div>
       <div class="kpi-detail">${nEgr.toLocaleString('es-MX')} movimientos</div>
     </div>
     <div class="kpi-card kpi-balance">
-      <div class="kpi-label">Balance</div>
+      <div class="kpi-label">Balance Neto</div>
       <div class="kpi-value" style="color:${bal >= 0 ? 'var(--income)' : 'var(--expense)'}">${formatMoney(bal)}</div>
       <div class="kpi-detail">${bal >= 0 ? '✓ Positivo' : '⚠ Negativo'}</div>
     </div>
     <div class="kpi-card kpi-rate">
       <div class="kpi-label">Movimientos</div>
       <div class="kpi-value">${filteredRows.length.toLocaleString('es-MX')}</div>
-      <div class="kpi-detail">${nota}</div>
+      <div class="kpi-detail">${kpiDetail4}</div>
     </div>`;
 
   const badge = document.getElementById(`sheet-badge-${idx}`);
@@ -2738,6 +2822,35 @@ function onSheetMesChange(idx, val) {
   if (!name) return;
   getSheetFilter2(name).mes = val;
   applySheetFilters2(name, idx);
+}
+
+function onSheetCuentaChange(idx, val) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  getSheetFilter2(name).cuenta = val;
+  applySheetFilters2(name, idx);
+}
+
+/** Actualiza la barra de contexto de filtros activos. */
+function updateContextBar2(idx, f) {
+  const ctxEl = document.getElementById(`sfb-ctx-text-${idx}`);
+  if (!ctxEl) return;
+
+  const parts = [];
+  if (f.year   !== 'all') parts.push(`Año: <strong>${f.year}</strong>`);
+  if (f.mes    !== 'all') parts.push(`Mes: <strong>${MONTHS_LONG[parseInt(f.mes)]}</strong>`);
+  if (f.cuenta !== 'all') parts.push(`Cuenta: <strong>${f.cuenta}</strong>`);
+  if (f.tipo   !== 'all') parts.push(`Tipo: <strong>${f.tipo}s</strong>`);
+  if (f.search)           parts.push(`Búsqueda: <strong>"${escHtml(f.search)}"</strong>`);
+
+  const bar = document.getElementById(`sfb-ctx-${idx}`);
+  if (parts.length === 0) {
+    ctxEl.innerHTML = 'Mostrando todos los registros';
+    if (bar) bar.classList.remove('sfb-ctx-active');
+  } else {
+    ctxEl.innerHTML = parts.join(' &nbsp;·&nbsp; ');
+    if (bar) bar.classList.add('sfb-ctx-active');
+  }
 }
 
 function sortSheetTable(idx, col) {
