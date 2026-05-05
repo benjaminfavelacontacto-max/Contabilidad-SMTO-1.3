@@ -1594,9 +1594,13 @@ let processedData2  = {};   // { sheetName: [normalizedRow] }
 let finalDataset2   = [];   // todos los rows combinados
 let file2FileName   = '';
 let sheetChartInsts = {};   // { sheetName: { bar, donut } }
-let activeSheetTab2 = null;
+let activeSheetTab2 = null; // legacy (no usado, reemplazado por selectedSheets2)
+let selectedSheets2 = new Set(); // hojas seleccionadas (multi-select)
 let sheetFilters2   = {};   // { sheetName: { year, mes, tipo, search, sortCol, sortDir } }
 let sheetIdxToName2 = {};   // { idx: sheetName } para onclick handlers seguros
+
+// ─── FILTROS DE CONSOLIDACIÓN ─────────────────────────────────────
+let consolFilters2 = { year: 'all', mes: 'all', cuenta: 'all' };
 
 // ─── CONFIGURACIÓN DE HOJAS (Sistema de Mapeo Dinámico) ──────────
 // Para agregar nuevas hojas en el futuro, solo agrega una entrada aquí.
@@ -2246,23 +2250,95 @@ function runConsolidation() {
     return a.fecha - b.fecha;
   });
 
-  renderConsolidationKPIs();
-  renderConsolidationTable();
+  // Resetear filtros de consolidación
+  consolFilters2 = { year: 'all', mes: 'all', cuenta: 'all' };
+  renderConsolidFilterBar();
+  applyConsolFilters();
 
   document.getElementById('stage3').classList.remove('hidden');
   setPipelineStep(3);
   document.getElementById('stage3').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+/** Construye la barra de filtros de consolidación con las opciones disponibles. */
+function renderConsolidFilterBar() {
+  const bar = document.getElementById('consolidFilterBar');
+  if (!bar) return;
+
+  const years   = [...new Set(finalDataset2.map(r => r.year || (r.fecha ? r.fecha.getFullYear() : null)).filter(Boolean))].sort();
+  const cuentas = [...new Set(finalDataset2.map(r => r.cuenta).filter(Boolean))].sort();
+
+  const yearOpts   = years.map(y => `<option value="${y}">${y}</option>`).join('');
+  const mesOpts    = MONTHS_LONG.map((m, mi) => `<option value="${mi}">${m}</option>`).join('');
+  const cuentaOpts = cuentas.map(c => `<option value="${escHtml(c)}">Cta. ${escHtml(c)}</option>`).join('');
+
+  bar.innerHTML = `
+    <div class="sfb-wrap consol-filter-wrap">
+      <div class="sfb-left">
+        <select class="sfb-select" id="consol-year-sel" onchange="onConsolFilter()">
+          <option value="all">Todos los años</option>${yearOpts}
+        </select>
+        <select class="sfb-select" id="consol-mes-sel" onchange="onConsolFilter()">
+          <option value="all">Todos los meses</option>${mesOpts}
+        </select>
+        ${cuentas.length > 0 ? `<select class="sfb-select" id="consol-cuenta-sel" onchange="onConsolFilter()">
+          <option value="all">Todas las cuentas</option>${cuentaOpts}
+        </select>` : ''}
+      </div>
+      <div class="sfb-right">
+        <span class="sfb-reset-link" onclick="resetConsolFilters()" title="Limpiar filtros">✕ Limpiar</span>
+      </div>
+    </div>`;
+  bar.style.display = 'block';
+}
+
+/** Lee los selectores de consolidación y re-renderiza KPIs + tabla. */
+function onConsolFilter() {
+  consolFilters2.year   = (document.getElementById('consol-year-sel')   || {}).value || 'all';
+  consolFilters2.mes    = (document.getElementById('consol-mes-sel')    || {}).value || 'all';
+  consolFilters2.cuenta = (document.getElementById('consol-cuenta-sel') || {}).value || 'all';
+  applyConsolFilters();
+}
+
+/** Aplica los filtros de consolidación y re-renderiza. */
+function applyConsolFilters() {
+  let rows = finalDataset2;
+  if (consolFilters2.year   !== 'all') rows = rows.filter(r => {
+    const y = r.year || (r.fecha ? r.fecha.getFullYear() : null);
+    return String(y) === String(consolFilters2.year);
+  });
+  if (consolFilters2.mes    !== 'all') rows = rows.filter(r => {
+    const m = r.mes != null ? r.mes : (r.fecha ? r.fecha.getMonth() : null);
+    return String(m) === String(consolFilters2.mes);
+  });
+  if (consolFilters2.cuenta !== 'all') rows = rows.filter(r => r.cuenta === consolFilters2.cuenta);
+  renderConsolidationKPIs(rows);
+  renderConsolidationTable(rows);
+}
+
+/** Limpia todos los filtros de consolidación. */
+function resetConsolFilters() {
+  consolFilters2 = { year: 'all', mes: 'all', cuenta: 'all' };
+  const ySel = document.getElementById('consol-year-sel');
+  const mSel = document.getElementById('consol-mes-sel');
+  const cSel = document.getElementById('consol-cuenta-sel');
+  if (ySel) ySel.value = 'all';
+  if (mSel) mSel.value = 'all';
+  if (cSel) cSel.value = 'all';
+  applyConsolFilters();
+}
+
 /** KPIs del consolidado. */
-function renderConsolidationKPIs() {
-  const rows   = finalDataset2;
+function renderConsolidationKPIs(rows) {
+  if (!rows) rows = finalDataset2;
   const ing    = rows.filter(r => r.tipo_registro === 'Ingreso');
   const egr    = rows.filter(r => r.tipo_registro === 'Egreso');
   const totalI = ing.reduce((s, r) => s + r.monto, 0);
   const totalE = egr.reduce((s, r) => s + r.monto, 0);
   const balance  = totalI - totalE;
   const cuentas  = new Set(rows.map(r => r.hoja)).size;
+  const isFiltered = rows.length < finalDataset2.length;
+  const filterNote = isFiltered ? ` <span class="consol-filter-note">(filtrado: ${rows.length.toLocaleString('es-MX')} de ${finalDataset2.length.toLocaleString('es-MX')})</span>` : '';
 
   document.getElementById('consolidationKPIs').innerHTML = `
     <div class="kpi-grid">
@@ -2298,14 +2374,14 @@ function renderConsolidationKPIs() {
           Total Movimientos
         </div>
         <div class="kpi-value">${rows.length.toLocaleString('es-MX')}</div>
-        <div class="kpi-detail">${cuentas} cuentas bancarias</div>
+        <div class="kpi-detail">${cuentas} cuentas bancarias${filterNote}</div>
       </div>
     </div>`;
 }
 
 /** Tabla de resumen por institución. */
-function renderConsolidationTable() {
-  const rows   = finalDataset2;
+function renderConsolidationTable(rows) {
+  if (!rows) rows = finalDataset2;
   const bancos = [...new Set(rows.map(r => r.banco))].sort();
   const tbody  = document.getElementById('consolidationTableBody');
   if (!tbody) return;
@@ -2420,15 +2496,27 @@ function renderAllSheetDashboards() {
   // Tabs de navegación
   const tabsNav = document.getElementById('sheetTabsNav');
   tabsNav.innerHTML = '';
+  selectedSheets2.clear();
+  selectedSheets2.add(sheetNames[0]); // seleccionar primera hoja por defecto
+
   sheetNames.forEach((name, i) => {
     const meta = classifySheet(name);
     const btn  = document.createElement('button');
     btn.className     = 'sheet-tab-btn' + (i === 0 ? ' active' : '');
     btn.dataset.sheet = name;
+    btn.title         = 'Click: alternar selección · Ctrl+Click: añadir a selección múltiple';
     btn.innerHTML     = `
       <span class="sheet-tab-name" title="${escHtml(name)}">${escHtml(name)}</span>
       <span class="sheet-tab-moneda sheet-pill-moneda-${meta.moneda}">${meta.moneda}</span>`;
-    btn.addEventListener('click', () => switchSheetTab(name));
+    btn.addEventListener('click', (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl/Cmd+Click: toggle sin limpiar selección actual
+        toggleSheetTab(name);
+      } else {
+        // Click normal: seleccionar solo esta hoja
+        selectOnlySheet(name);
+      }
+    });
     tabsNav.appendChild(btn);
   });
 
@@ -2450,13 +2538,20 @@ function renderAllSheetDashboards() {
   });
 
   // Inicializar filtros + tabla de TODAS las hojas (renderiza en background)
-  sheetNames.forEach((name, i) => initSheetFilters2(name, i));
+  sheetNames.forEach((name, i) => {
+    initSheetFilters2(name, i);
+    initColResize2(i);
+  });
 
-  // Renderizar charts solo de la hoja activa
+  // Renderizar charts de la hoja activa inicial
   if (sheetNames.length > 0) {
     activeSheetTab2 = sheetNames[0];
     renderSheetCharts(sheetNames[0], 0);
   }
+
+  // Asegurar que el summary multi-hoja esté oculto al inicio
+  const ms = document.getElementById('multiSheetSummary');
+  if (ms) { ms.style.display = 'none'; ms.innerHTML = ''; }
 }
 
 /**
@@ -3074,6 +3169,51 @@ function sortSheetTable(idx, col) {
   applySheetFilters2(name, idx);
 }
 
+/** Agrega handles de resize a cada TH de la tabla de hoja.
+ *  Arrastra el borde derecho del TH para ajustar el ancho. */
+function initColResize2(idx) {
+  const table = document.getElementById(`sheet-table-${idx}`);
+  if (!table) return;
+
+  // Asegurar que la tabla use table-layout:fixed para que los anchos sean respetados
+  table.style.tableLayout = 'fixed';
+
+  const ths = Array.from(table.querySelectorAll('thead th'));
+  ths.forEach((th) => {
+    // Evitar duplicar handles
+    if (th.querySelector('.col-resize-handle')) return;
+
+    const handle = document.createElement('div');
+    handle.className = 'col-resize-handle';
+    th.appendChild(handle);
+
+    let startX = 0, startW = 0;
+
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startX = e.clientX;
+      startW = th.getBoundingClientRect().width;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMove = (ev) => {
+        const newW = Math.max(55, startW + (ev.clientX - startX));
+        th.style.width    = newW + 'px';
+        th.style.minWidth = newW + 'px';
+      };
+      const onUp = () => {
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup',   onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup',   onUp);
+    });
+  });
+}
+
 function updateSortIcons2(idx, f) {
   const cols = ['fecha','descripcion_corta','factura','concepto','ingreso','egreso'];
   for (const col of cols) {
@@ -3231,21 +3371,116 @@ function updateColFilterIndicators2(idx, f) {
   }
 }
 
-/** Cambia la hoja activa en los dashboards. */
-function switchSheetTab(sheetName) {
-  activeSheetTab2 = sheetName;
+// ── NAVEGACIÓN POR HOJAS (con soporte multi-selección) ──────────────
 
+/** Selecciona SOLO esta hoja (click normal). */
+function selectOnlySheet(sheetName) {
+  selectedSheets2.clear();
+  selectedSheets2.add(sheetName);
+  _applySheetSelection(sheetName);
+}
+
+/** Alterna la selección de esta hoja (Ctrl+Click). */
+function toggleSheetTab(sheetName) {
+  if (selectedSheets2.has(sheetName)) {
+    if (selectedSheets2.size <= 1) return; // no dejar vacío
+    selectedSheets2.delete(sheetName);
+  } else {
+    selectedSheets2.add(sheetName);
+  }
+  _applySheetSelection(sheetName);
+}
+
+/** Alias legacy usado internamente. */
+function switchSheetTab(sheetName) { selectOnlySheet(sheetName); }
+
+/** Aplica visualmente la selección actual de hojas. */
+function _applySheetSelection(lastChanged) {
+  // Actualizar clases de tabs
   document.querySelectorAll('.sheet-tab-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.sheet === sheetName);
+    btn.classList.toggle('active', selectedSheets2.has(btn.dataset.sheet));
   });
 
+  // Mostrar / ocultar panels
   document.querySelectorAll('.sheet-dashboard-panel').forEach(panel => {
-    panel.classList.toggle('active', panel.dataset.sheet === sheetName);
+    panel.classList.toggle('active', selectedSheets2.has(panel.dataset.sheet));
   });
 
+  // Renderizar charts solo para la última hoja cambiada (si está seleccionada)
   const sheetNames = Object.keys(processedData2);
-  const idx = sheetNames.indexOf(sheetName);
-  if (idx >= 0) renderSheetCharts(sheetName, idx);
+  if (selectedSheets2.has(lastChanged)) {
+    const idx = sheetNames.indexOf(lastChanged);
+    if (idx >= 0) renderSheetCharts(lastChanged, idx);
+  }
+
+  // Actualizar resumen multi-hoja
+  renderMultiSheetSummary2();
+}
+
+/** Renderiza (o esconde) el resumen combinado de múltiples hojas seleccionadas. */
+function renderMultiSheetSummary2() {
+  const el = document.getElementById('multiSheetSummary');
+  if (!el) return;
+
+  const selected = [...selectedSheets2];
+  if (selected.length <= 1) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+
+  // Agregar datos de todas las hojas seleccionadas
+  let allRows = [];
+  for (const name of selected) allRows = allRows.concat(processedData2[name] || []);
+
+  const ing    = allRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
+  const egr    = allRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
+  const bal    = ing - egr;
+  const nIng   = allRows.filter(r => r.tipo_registro === 'Ingreso').length;
+  const nEgr   = allRows.filter(r => r.tipo_registro === 'Egreso').length;
+  const labels = selected.map(n => n.length > 18 ? n.substring(0, 18) + '…' : n).join(', ');
+
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="multi-sheet-bar">
+      <div class="multi-sheet-header">
+        <span class="multi-sheet-icon">⊕</span>
+        <span class="multi-sheet-title">Selección combinada — <strong>${selected.length}</strong> hojas</span>
+        <span class="multi-sheet-names">${escHtml(labels)}</span>
+        <button class="multi-sheet-clear-btn" onclick="clearMultiSelection()">✕ Limpiar selección</button>
+      </div>
+      <div class="kpi-grid sheet-kpi-grid">
+        <div class="kpi-card kpi-income">
+          <div class="kpi-label">↑ Ingresos combinados</div>
+          <div class="kpi-value">${formatMoney(ing)}</div>
+          <div class="kpi-detail">${nIng.toLocaleString('es-MX')} movimientos</div>
+        </div>
+        <div class="kpi-card kpi-expense">
+          <div class="kpi-label">↓ Egresos combinados</div>
+          <div class="kpi-value">${formatMoney(egr)}</div>
+          <div class="kpi-detail">${nEgr.toLocaleString('es-MX')} movimientos</div>
+        </div>
+        <div class="kpi-card kpi-balance">
+          <div class="kpi-label">Balance Neto</div>
+          <div class="kpi-value" style="color:${bal >= 0 ? 'var(--income)' : 'var(--expense)'}">
+            ${formatMoney(bal)}
+          </div>
+          <div class="kpi-detail">${bal >= 0 ? '✓ Positivo' : '⚠ Negativo'}</div>
+        </div>
+        <div class="kpi-card kpi-rate">
+          <div class="kpi-label">Total Movimientos</div>
+          <div class="kpi-value">${allRows.length.toLocaleString('es-MX')}</div>
+          <div class="kpi-detail">${selected.length} cuentas seleccionadas</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+/** Limpia la selección múltiple y queda solo la primera hoja. */
+function clearMultiSelection() {
+  const sheetNames = Object.keys(processedData2);
+  if (!sheetNames.length) return;
+  selectOnlySheet(sheetNames[0]);
 }
 
 /** Renderiza las gráficas de una hoja respetando el filtro de año activo. */
@@ -3413,13 +3648,15 @@ function hideImport2Error() {
 
 // ─── RESET MÓDULO 2 ──────────────────────────────────────────────
 function resetImport2() {
-  rawDataFile2    = {};
-  processedData2  = {};
-  finalDataset2   = [];
-  file2FileName   = '';
-  activeSheetTab2 = null;
-  sheetFilters2   = {};
-  sheetIdxToName2 = {};
+  rawDataFile2     = {};
+  processedData2   = {};
+  finalDataset2    = [];
+  file2FileName    = '';
+  activeSheetTab2  = null;
+  selectedSheets2  = new Set();
+  consolFilters2   = { year: 'all', mes: 'all', cuenta: 'all' };
+  sheetFilters2    = {};
+  sheetIdxToName2  = {};
 
   // Destruir chart instances
   for (const insts of Object.values(sheetChartInsts)) {
