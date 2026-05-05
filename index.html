@@ -482,6 +482,9 @@
             </div>
           </div>
 
+          <!-- Filtros de consolidación (año / mes / cuenta — generado por JS) -->
+          <div id="consolidFilterBar" style="display:none"></div>
+
           <!-- KPIs (generado por JS) -->
           <div id="consolidationKPIs"></div>
 
@@ -538,6 +541,11 @@
 
           <!-- Tabs de selección de hoja (generado por JS) -->
           <div id="sheetTabsNav" class="sheet-tabs-nav"></div>
+          <!-- Nota de multi-selección -->
+          <p class="multi-select-hint">Tip: <kbd>Ctrl</kbd>+Click en varios tabs para sumar cuentas</p>
+
+          <!-- Resumen combinado de hojas múltiples (visible cuando hay 2+ seleccionadas) -->
+          <div id="multiSheetSummary" style="display:none"></div>
 
           <!-- Panels de dashboard por hoja (generado por JS) -->
           <div id="sheetDashboardsContainer"></div>
@@ -558,6 +566,7 @@
   <!-- LIBRERÍAS -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="script.js"></script>
 
 </body>
