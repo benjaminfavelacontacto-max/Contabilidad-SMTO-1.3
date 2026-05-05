@@ -2001,23 +2001,24 @@ body {
 
 .sort-icon.sort-active { color: var(--accent); font-weight: 700; }
 
-/* Anchos de columna fijos para la tabla de movimientos */
+/* Anchos de columna iniciales para la tabla de movimientos.
+   Son ajustables via drag en el handle de cada TH. */
 .sheet-detail-table th:nth-child(1),
-.sheet-detail-table td:nth-child(1) { width: 96px; }
+.sheet-detail-table td:nth-child(1) { width: 108px; min-width: 80px; }
 
 .sheet-detail-table th:nth-child(2),
-.sheet-detail-table td:nth-child(2) { width: 90px; }
+.sheet-detail-table td:nth-child(2) { width: 110px; min-width: 70px; }
 
 .sheet-detail-table th:nth-child(3),
-.sheet-detail-table td:nth-child(3) { width: 100px; }
+.sheet-detail-table td:nth-child(3) { width: 130px; min-width: 80px; }
 
 .sheet-detail-table th:nth-child(4),
-.sheet-detail-table td:nth-child(4) { /* Concepto: ocupa el resto */ }
+.sheet-detail-table td:nth-child(4) { min-width: 160px; } /* Concepto: ocupa el resto */
 
 .sheet-detail-table th:nth-child(5),
 .sheet-detail-table td:nth-child(5),
 .sheet-detail-table th:nth-child(6),
-.sheet-detail-table td:nth-child(6) { width: 120px; }
+.sheet-detail-table td:nth-child(6) { width: 130px; min-width: 90px; }
 
 /* Celda de referencia/factura */
 .td-ref {
@@ -2331,6 +2332,145 @@ tfoot strong { font-weight: 600; }
   background: rgba(244,63,94,0.1);
   border-color: var(--expense);
   color: var(--expense);
+}
+
+/* ─── Filtros de Consolidación ──────────────────────── */
+.consol-filter-wrap {
+  margin: 0 0 20px 0;
+  background: var(--bg-2);
+}
+
+.sfb-reset-link {
+  font-size: 12px;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 8px;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+.sfb-reset-link:hover { color: var(--expense); background: var(--expense-bg); }
+
+.consol-filter-note {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* ─── Multi-select hint ─────────────────────────────── */
+.multi-select-hint {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin: 6px 0 14px;
+  padding: 0 4px;
+}
+.multi-select-hint kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+/* ─── Resumen multi-hoja ────────────────────────────── */
+.multi-sheet-bar {
+  background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.06));
+  border: 1px solid rgba(99,102,241,0.25);
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  margin-bottom: 22px;
+  animation: fadeUp 0.25s ease;
+}
+
+.multi-sheet-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.multi-sheet-icon {
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.multi-sheet-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.multi-sheet-names {
+  font-size: 11.5px;
+  color: var(--text-3);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multi-sheet-clear-btn {
+  background: transparent;
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: var(--transition);
+  font-family: inherit;
+  white-space: nowrap;
+}
+.multi-sheet-clear-btn:hover {
+  background: var(--expense-bg);
+  border-color: var(--expense);
+  color: var(--expense);
+}
+
+/* Tab activo con multi-selección: borde doble */
+.sheet-tab-btn.active {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ─── Column resize handle ──────────────────────────── */
+.col-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 10;
+  transition: background 0.15s;
+}
+.col-resize-handle:hover,
+.col-resize-handle:active {
+  background: var(--accent);
+  opacity: 0.5;
+  border-radius: 2px;
+}
+
+/* Asegurar position:relative en TH para que el handle funcione */
+.sheet-detail-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg-3);
+  box-shadow: 0 1px 0 var(--border-2);
+  /* Necesario para el resize handle */
+  overflow: visible !important;
+}
+
+/* Override: los TH filterable deben tener overflow visible */
+.sheet-detail-table thead th.filterable-th {
+  overflow: visible !important;
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
 
 /* ─── Light mode overrides ──────────────────────────── */
