@@ -2463,28 +2463,142 @@ function renderAllSheetDashboards() {
  * Genera el HTML esqueleto del dashboard por hoja.
  * KPIs y tabla se renderizan dinámicamente via initSheetFilters2 → applySheetFilters2.
  */
+/**
+ * Genera el HTML esqueleto del dashboard por hoja.
+ * Estructura:
+ *   - Encabezado (título + metadatos)
+ *   - sfb-wrap: selectores globales (año / mes / cuenta / búsqueda). Sin quick buttons.
+ *   - Barra de contexto activo
+ *   - KPIs (renderizados por initSheetFilters2 / applySheetFilters2)
+ *   - Gráficas
+ *   - tbl-top-bar: botones Todos / Ingresos / Egresos JUSTO ARRIBA de la tabla
+ *   - Tabla interactiva con sort + filtro por columna
+ *   - Paneles de filtro por columna (posicionados como fixed por JS)
+ */
 function buildSheetDashboardHTML(sheetName, idx) {
-  const meta  = classifySheet(sheetName);
-  const rows  = processedData2[sheetName] || [];
-  const years = [...new Set(rows.map(r => r.year).filter(Boolean))].sort();
+  const meta    = classifySheet(sheetName);
+  const rows    = processedData2[sheetName] || [];
+  const years   = [...new Set(rows.map(r => r.year).filter(Boolean))].sort();
   const yearStr = years.join(', ');
+  const cuentas = [...new Set(rows.map(r => r.cuenta).filter(Boolean))].sort();
 
-  // ── Opciones del selector de año ──────────────────────────────
-  const yearOpts = years.map(y =>
-    `<option value="${y}">${y}</option>`
-  ).join('');
+  const yearOpts   = years.map(y => `<option value="${y}">${y}</option>`).join('');
+  const mesOpts    = MONTHS_LONG.map((m, mi) => `<option value="${mi}">${m}</option>`).join('');
+  const cuentaOpts = cuentas.map(c => `<option value="${escHtml(c)}">Cuenta ${escHtml(c)}</option>`).join('');
+  const showCuenta = cuentas.length > 0;
 
-  // ── Opciones del selector de mes ──────────────────────────────
-  const mesOpts = MONTHS_LONG.map((m, mi) =>
-    `<option value="${mi}">${m}</option>`
-  ).join('');
+  // ── Icono de embudo para filtros de columna ───────────────────
+  const funnelIcon = `<svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor">
+    <path d="M0.5 1h9l-3.5 4v3.5l-2-1V5z"/>
+  </svg>`;
 
-  // ── Cuentas únicas detectadas en esta hoja ──────────────────
-  const cuentas     = [...new Set(rows.map(r => r.cuenta).filter(Boolean))].sort();
-  const cuentaOpts  = cuentas.map(c => `<option value="${escHtml(c)}">Cuenta ${escHtml(c)}</option>`).join('');
-  const showCuenta  = cuentas.length > 0;
+  // ── Helper: construye un <th> con sort + filtro por columna ──
+  const colTH = (col, label, align = '') => `
+    <th class="filterable-th${align ? ' ' + align : ''}">
+      <div class="th-inner">
+        <span class="th-sort-span" onclick="sortSheetTable(${idx},'${col}')">
+          ${label}<span class="sort-icon" id="sh-si-${col}-${idx}"> ⇅</span>
+        </span>
+        <button class="col-fltr-btn" id="cfb-${col}-${idx}"
+          onclick="toggleColFilter2(event,${idx},'${col}')"
+          title="Filtrar ${label}">${funnelIcon}</button>
+      </div>
+    </th>`;
+
+  // ── Paneles de filtro por columna (posicionados via JS fixed) ─
+  const colPanels = `
+    <!-- ── Panel filtro: Fecha ── -->
+    <div class="col-fltr-panel" id="cfp-fecha-${idx}">
+      <div class="cfp-title">Filtrar Fecha</div>
+      <div class="cfp-body">
+        <div class="cfp-field">
+          <label class="cfp-label">Desde</label>
+          <input class="cfp-input cfp-input-date" type="date" id="cff-fecha-min-${idx}"
+            onchange="onColFilter(${idx},'fecha')">
+        </div>
+        <div class="cfp-field">
+          <label class="cfp-label">Hasta</label>
+          <input class="cfp-input cfp-input-date" type="date" id="cff-fecha-max-${idx}"
+            onchange="onColFilter(${idx},'fecha')">
+        </div>
+      </div>
+      <div class="cfp-actions">
+        <button class="cfp-clear-btn" onclick="clearColFilter(${idx},'fecha')">Limpiar filtro</button>
+      </div>
+    </div>
+
+    <!-- ── Panel filtro: Desc ── -->
+    <div class="col-fltr-panel" id="cfp-descripcion_corta-${idx}">
+      <div class="cfp-title">Filtrar Descripción</div>
+      <div class="cfp-body">
+        <input class="cfp-input" type="text" id="cff-descripcion_corta-text-${idx}"
+          placeholder="Buscar…" oninput="onColFilter(${idx},'descripcion_corta')">
+      </div>
+      <div class="cfp-actions">
+        <button class="cfp-clear-btn" onclick="clearColFilter(${idx},'descripcion_corta')">Limpiar filtro</button>
+      </div>
+    </div>
+
+    <!-- ── Panel filtro: Factura ── -->
+    <div class="col-fltr-panel" id="cfp-factura-${idx}">
+      <div class="cfp-title">Filtrar Factura / Folio</div>
+      <div class="cfp-body">
+        <input class="cfp-input" type="text" id="cff-factura-text-${idx}"
+          placeholder="Número de factura…" oninput="onColFilter(${idx},'factura')">
+      </div>
+      <div class="cfp-actions">
+        <button class="cfp-clear-btn" onclick="clearColFilter(${idx},'factura')">Limpiar filtro</button>
+      </div>
+    </div>
+
+    <!-- ── Panel filtro: Concepto ── -->
+    <div class="col-fltr-panel" id="cfp-concepto-${idx}">
+      <div class="cfp-title">Filtrar Concepto</div>
+      <div class="cfp-body">
+        <input class="cfp-input" type="text" id="cff-concepto-text-${idx}"
+          placeholder="Buscar en concepto…" oninput="onColFilter(${idx},'concepto')">
+      </div>
+      <div class="cfp-actions">
+        <button class="cfp-clear-btn" onclick="clearColFilter(${idx},'concepto')">Limpiar filtro</button>
+      </div>
+    </div>
+
+    <!-- ── Panel filtro: Ingreso (rango) ── -->
+    <div class="col-fltr-panel" id="cfp-ingreso-${idx}">
+      <div class="cfp-title">Filtrar Ingreso</div>
+      <div class="cfp-body">
+        <div class="cfp-range">
+          <input class="cfp-input" type="number" min="0" id="cff-ingreso-min-${idx}"
+            placeholder="Mínimo" oninput="onColFilter(${idx},'ingreso')">
+          <span class="cfp-range-sep">—</span>
+          <input class="cfp-input" type="number" min="0" id="cff-ingreso-max-${idx}"
+            placeholder="Máximo" oninput="onColFilter(${idx},'ingreso')">
+        </div>
+      </div>
+      <div class="cfp-actions">
+        <button class="cfp-clear-btn" onclick="clearColFilter(${idx},'ingreso')">Limpiar filtro</button>
+      </div>
+    </div>
+
+    <!-- ── Panel filtro: Egreso (rango) ── -->
+    <div class="col-fltr-panel" id="cfp-egreso-${idx}">
+      <div class="cfp-title">Filtrar Egreso</div>
+      <div class="cfp-body">
+        <div class="cfp-range">
+          <input class="cfp-input" type="number" min="0" id="cff-egreso-min-${idx}"
+            placeholder="Mínimo" oninput="onColFilter(${idx},'egreso')">
+          <span class="cfp-range-sep">—</span>
+          <input class="cfp-input" type="number" min="0" id="cff-egreso-max-${idx}"
+            placeholder="Máximo" oninput="onColFilter(${idx},'egreso')">
+        </div>
+      </div>
+      <div class="cfp-actions">
+        <button class="cfp-clear-btn" onclick="clearColFilter(${idx},'egreso')">Limpiar filtro</button>
+      </div>
+    </div>`;
 
   return `
+    <!-- ── Encabezado de hoja ──────────────────────────────── -->
     <div class="sheet-dash-header">
       <div>
         <h3 class="sheet-dash-title">${escHtml(sheetName)}</h3>
@@ -2493,45 +2607,30 @@ function buildSheetDashboardHTML(sheetName, idx) {
       <span class="table-badge" id="sheet-badge-${idx}">${rows.length.toLocaleString('es-MX')} movimientos</span>
     </div>
 
-    <!-- ── Barra de filtros ──────────────────────────────────── -->
+    <!-- ── Filtros globales: año / mes / cuenta / búsqueda ─── -->
     <div class="sfb-wrap">
       <div class="sfb-left">
-        <select class="sfb-select" id="sfb-year-${idx}"
-          onchange="onSheetYearChange(${idx}, this.value)">
-          <option value="all">Todos los años</option>
-          ${yearOpts}
+        <select class="sfb-select" id="sfb-year-${idx}" onchange="onSheetYearChange(${idx},this.value)">
+          <option value="all">Todos los años</option>${yearOpts}
         </select>
-        <select class="sfb-select" id="sfb-mes-${idx}"
-          onchange="onSheetMesChange(${idx}, this.value)">
-          <option value="all">Todos los meses</option>
-          ${mesOpts}
+        <select class="sfb-select" id="sfb-mes-${idx}" onchange="onSheetMesChange(${idx},this.value)">
+          <option value="all">Todos los meses</option>${mesOpts}
         </select>
-        ${showCuenta ? `
-        <select class="sfb-select" id="sfb-cuenta-${idx}"
-          onchange="onSheetCuentaChange(${idx}, this.value)">
-          <option value="all">Todas las cuentas</option>
-          ${cuentaOpts}
+        ${showCuenta ? `<select class="sfb-select" id="sfb-cuenta-${idx}" onchange="onSheetCuentaChange(${idx},this.value)">
+          <option value="all">Todas las cuentas</option>${cuentaOpts}
         </select>` : ''}
-        <div class="sfb-quick-wrap">
-          <button class="sfb-quick sfb-active" id="sfb-todos-${idx}"
-            onclick="setSheetTipo(${idx}, 'all', this)">Ver todo</button>
-          <button class="sfb-quick sfb-income" id="sfb-ing-${idx}"
-            onclick="setSheetTipo(${idx}, 'Ingreso', this)">↑ Ingresos</button>
-          <button class="sfb-quick sfb-expense" id="sfb-egr-${idx}"
-            onclick="setSheetTipo(${idx}, 'Egreso', this)">↓ Egresos</button>
-        </div>
       </div>
       <div class="sfb-right">
         <div class="sfb-search-wrap">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" class="sfb-search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <input type="text" class="sfb-search" id="sfb-search-${idx}"
             placeholder="Buscar en todos los campos…"
-            oninput="onSheetSearch(${idx}, this.value)">
+            oninput="onSheetSearch(${idx},this.value)">
         </div>
       </div>
     </div>
 
-    <!-- ── Contexto activo de filtros ───────────────────────── -->
+    <!-- ── Barra de contexto de filtros activos ─────────────── -->
     <div class="sfb-context-bar" id="sfb-ctx-${idx}">
       <span class="sfb-ctx-icon">◎</span>
       <span id="sfb-ctx-text-${idx}">Mostrando todos los registros</span>
@@ -2553,41 +2652,40 @@ function buildSheetDashboardHTML(sheetName, idx) {
         <div class="chart-body"><canvas id="sheet-bar-${idx}"></canvas></div>
       </div>
       <div class="chart-card chart-donut-card">
-        <div class="chart-header">
-          <h3 class="chart-title">Distribución por Tipo</h3>
-        </div>
+        <div class="chart-header"><h3 class="chart-title">Distribución por Tipo</h3></div>
         <div class="chart-body donut-body"><canvas id="sheet-donut-${idx}"></canvas></div>
       </div>
     </div>
 
     <!-- ── Tabla interactiva ──────────────────────────────────── -->
     <div class="table-card">
-      <div class="table-header">
-        <h3 class="chart-title">Movimientos</h3>
+
+      <!-- BOTONES JUSTO ARRIBA DE LA TABLA -->
+      <div class="tbl-top-bar">
+        <span class="tbl-quick-label">Mostrar:</span>
+        <div class="tbl-quick-row">
+          <button class="sfb-quick sfb-active" id="sfb-todos-${idx}"
+            onclick="setSheetTipo(${idx},'all',this)">Todos</button>
+          <button class="sfb-quick sfb-income" id="sfb-ing-${idx}"
+            onclick="setSheetTipo(${idx},'Ingreso',this)">↑ Ingresos</button>
+          <button class="sfb-quick sfb-expense" id="sfb-egr-${idx}"
+            onclick="setSheetTipo(${idx},'Egreso',this)">↓ Egresos</button>
+        </div>
+        <div class="tbl-top-spacer"></div>
         <span class="table-badge" id="sheet-tbl-badge-${idx}">${rows.length.toLocaleString('es-MX')} registros</span>
       </div>
-      <div class="table-wrapper tx-table-wrapper">
+
+      <!-- Tabla con sticky header y filtros por columna -->
+      <div class="table-wrapper tx-table-wrapper sheet-tx-wrap" id="twrap-${idx}">
         <table class="data-table sheet-detail-table" id="sheet-table-${idx}">
           <thead>
             <tr>
-              <th class="sort-th" onclick="sortSheetTable(${idx}, 'fecha')">
-                Fecha <span class="sort-icon" id="sh-si-fecha-${idx}">⇅</span>
-              </th>
-              <th class="sort-th" onclick="sortSheetTable(${idx}, 'descripcion_corta')">
-                Desc <span class="sort-icon" id="sh-si-descripcion_corta-${idx}">⇅</span>
-              </th>
-              <th class="sort-th" onclick="sortSheetTable(${idx}, 'factura')">
-                Factura <span class="sort-icon" id="sh-si-factura-${idx}">⇅</span>
-              </th>
-              <th class="sort-th" onclick="sortSheetTable(${idx}, 'concepto')">
-                Concepto <span class="sort-icon" id="sh-si-concepto-${idx}">⇅</span>
-              </th>
-              <th class="sort-th text-right" onclick="sortSheetTable(${idx}, 'ingreso')">
-                Ingreso <span class="sort-icon" id="sh-si-ingreso-${idx}">⇅</span>
-              </th>
-              <th class="sort-th text-right" onclick="sortSheetTable(${idx}, 'egreso')">
-                Egreso <span class="sort-icon" id="sh-si-egreso-${idx}">⇅</span>
-              </th>
+              ${colTH('fecha',              'Fecha')}
+              ${colTH('descripcion_corta',  'Desc')}
+              ${colTH('factura',            'Factura')}
+              ${colTH('concepto',           'Concepto')}
+              ${colTH('ingreso',            'Ingreso',  'text-right')}
+              ${colTH('egreso',             'Egreso',   'text-right')}
             </tr>
           </thead>
           <tbody id="sheet-tbody-${idx}">
@@ -2596,6 +2694,9 @@ function buildSheetDashboardHTML(sheetName, idx) {
           <tfoot id="sheet-tfoot-${idx}"></tfoot>
         </table>
       </div>
+
+      <!-- Paneles de filtro por columna (position:fixed via JS) -->
+      ${colPanels}
     </div>`;
 }
 
@@ -2610,6 +2711,25 @@ function getSheetFilter2(sheetName) {
     sheetFilters2[sheetName] = {
       year: 'all', mes: 'all', tipo: 'all', cuenta: 'all',
       search: '', sortCol: 'fecha', sortDir: 'desc',
+      col: {
+        fecha:             { min: '', max: '' },
+        descripcion_corta: { text: '' },
+        factura:           { text: '' },
+        concepto:          { text: '' },
+        ingreso:           { min: '', max: '' },
+        egreso:            { min: '', max: '' },
+      },
+    };
+  }
+  // Ensure col sub-object exists on older filter state objects
+  if (!sheetFilters2[sheetName].col) {
+    sheetFilters2[sheetName].col = {
+      fecha:             { min: '', max: '' },
+      descripcion_corta: { text: '' },
+      factura:           { text: '' },
+      concepto:          { text: '' },
+      ingreso:           { min: '', max: '' },
+      egreso:            { min: '', max: '' },
     };
   }
   return sheetFilters2[sheetName];
@@ -2619,6 +2739,22 @@ function getSheetFilter2(sheetName) {
 function initSheetFilters2(sheetName, idx) {
   getSheetFilter2(sheetName);
   applySheetFilters2(sheetName, idx);
+
+  // Registrar listener global (una sola vez) para cerrar panels al hacer click fuera
+  if (!window._colFltrListener2Registered) {
+    window._colFltrListener2Registered = true;
+    document.addEventListener('click', (e) => {
+      // Si el click no fue en un panel ni en un botón de filtro, cerrar todos
+      if (!e.target.closest('.col-fltr-panel') && !e.target.closest('.col-fltr-btn')) {
+        document.querySelectorAll('.col-fltr-panel.open').forEach(p => p.classList.remove('open'));
+      }
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.col-fltr-panel.open').forEach(p => p.classList.remove('open'));
+      }
+    });
+  }
 }
 
 /** Filtra, ordena y re-renderiza tabla + KPIs para una hoja. */
@@ -2644,6 +2780,61 @@ function applySheetFilters2(sheetName, idx) {
     );
   }
 
+  // ── Filtros por columna ────────────────────────────────────────
+  const cf = f.col || {};
+
+  // Fecha (rango)
+  if (cf.fecha) {
+    if (cf.fecha.min) {
+      const minTs = new Date(cf.fecha.min + 'T00:00:00').getTime();
+      rows = rows.filter(r => r.fecha && r.fecha.getTime() >= minTs);
+    }
+    if (cf.fecha.max) {
+      const maxTs = new Date(cf.fecha.max + 'T23:59:59').getTime();
+      rows = rows.filter(r => r.fecha && r.fecha.getTime() <= maxTs);
+    }
+  }
+  // Descripción (texto parcial)
+  if (cf.descripcion_corta && cf.descripcion_corta.text) {
+    const t = cf.descripcion_corta.text.toLowerCase();
+    rows = rows.filter(r => (r.descripcion_corta || '').toLowerCase().includes(t));
+  }
+  // Factura (texto parcial)
+  if (cf.factura && cf.factura.text) {
+    const t = cf.factura.text.toLowerCase();
+    rows = rows.filter(r => (r.factura || '').toLowerCase().includes(t));
+  }
+  // Concepto (texto parcial)
+  if (cf.concepto && cf.concepto.text) {
+    const t = cf.concepto.text.toLowerCase();
+    rows = rows.filter(r =>
+      (r.concepto || '').toLowerCase().includes(t) ||
+      (r.descripcion || '').toLowerCase().includes(t)
+    );
+  }
+  // Ingreso (rango numérico — solo aplica a filas de tipo Ingreso)
+  if (cf.ingreso) {
+    if (cf.ingreso.min !== '') {
+      const mn = parseFloat(cf.ingreso.min);
+      if (!isNaN(mn)) rows = rows.filter(r => r.tipo_registro !== 'Ingreso' || r.monto >= mn);
+    }
+    if (cf.ingreso.max !== '') {
+      const mx = parseFloat(cf.ingreso.max);
+      if (!isNaN(mx)) rows = rows.filter(r => r.tipo_registro !== 'Ingreso' || r.monto <= mx);
+    }
+  }
+  // Egreso (rango numérico — solo aplica a filas de tipo Egreso)
+  if (cf.egreso) {
+    if (cf.egreso.min !== '') {
+      const mn = parseFloat(cf.egreso.min);
+      if (!isNaN(mn)) rows = rows.filter(r => r.tipo_registro !== 'Egreso' || r.monto >= mn);
+    }
+    if (cf.egreso.max !== '') {
+      const mx = parseFloat(cf.egreso.max);
+      if (!isNaN(mx)) rows = rows.filter(r => r.tipo_registro !== 'Egreso' || r.monto <= mx);
+    }
+  }
+
   // ── Ordenamiento ───────────────────────────────────────────────
   const col = f.sortCol;
   const dir = f.sortDir === 'asc' ? 1 : -1;
@@ -2659,6 +2850,7 @@ function applySheetFilters2(sheetName, idx) {
   renderSheetTableBody2(sheetName, idx, rows);
   updateSortIcons2(idx, f);
   updateContextBar2(idx, f);
+  updateColFilterIndicators2(idx, f);
 }
 
 /** Renderiza KPIs reactivos según las filas filtradas. */
@@ -2843,6 +3035,22 @@ function updateContextBar2(idx, f) {
   if (f.tipo   !== 'all') parts.push(`Tipo: <strong>${f.tipo}s</strong>`);
   if (f.search)           parts.push(`Búsqueda: <strong>"${escHtml(f.search)}"</strong>`);
 
+  // Filtros de columna activos
+  const cf = f.col || {};
+  const COL_LABELS = {
+    fecha: 'Fecha', descripcion_corta: 'Desc',
+    factura: 'Factura', concepto: 'Concepto',
+    ingreso: 'Ingreso', egreso: 'Egreso'
+  };
+  for (const [key, label] of Object.entries(COL_LABELS)) {
+    const s = cf[key];
+    if (!s) continue;
+    if (s.text)            parts.push(`${label}: <strong>"${escHtml(s.text)}"</strong>`);
+    if (s.min && s.max)    parts.push(`${label}: <strong>${s.min}–${s.max}</strong>`);
+    else if (s.min)        parts.push(`${label}: <strong>≥ ${s.min}</strong>`);
+    else if (s.max)        parts.push(`${label}: <strong>≤ ${s.max}</strong>`);
+  }
+
   const bar = document.getElementById(`sfb-ctx-${idx}`);
   if (parts.length === 0) {
     ctxEl.innerHTML = 'Mostrando todos los registros';
@@ -2878,6 +3086,148 @@ function updateSortIcons2(idx, f) {
       el.textContent = '⇅';
       el.className   = 'sort-icon';
     }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// FILTROS POR COLUMNA (TIPO EXCEL)
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * Muestra/oculta el panel de filtro de columna, posicionándolo
+ * justo debajo del botón usando position:fixed + getBoundingClientRect().
+ */
+function toggleColFilter2(event, idx, col) {
+  event.stopPropagation();
+  const panelId = `cfp-${col}-${idx}`;
+  const panel   = document.getElementById(panelId);
+  if (!panel) return;
+
+  const isOpen = panel.classList.contains('open');
+
+  // Cerrar todos los panels abiertos primero
+  document.querySelectorAll('.col-fltr-panel.open').forEach(p => p.classList.remove('open'));
+
+  if (isOpen) return; // era toggle — ya está cerrado
+
+  // Posicionar debajo del botón
+  const btn  = event.currentTarget;
+  const rect = btn.getBoundingClientRect();
+  const spaceBelow = window.innerHeight - rect.bottom;
+  const panelH = 180; // altura estimada del panel
+
+  panel.style.position = 'fixed';
+  panel.style.zIndex   = '9999';
+  panel.style.left     = Math.min(rect.left, window.innerWidth - 260) + 'px';
+
+  if (spaceBelow >= panelH || spaceBelow >= 100) {
+    // Abrir hacia abajo
+    panel.style.top    = (rect.bottom + 4) + 'px';
+    panel.style.bottom = 'auto';
+  } else {
+    // Abrir hacia arriba
+    panel.style.top    = 'auto';
+    panel.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+  }
+
+  panel.classList.add('open');
+
+  // Enfocar primer input del panel
+  const firstInput = panel.querySelector('input');
+  if (firstInput) setTimeout(() => firstInput.focus(), 50);
+}
+
+/**
+ * Lee los inputs del panel de filtro, actualiza el estado y vuelve a filtrar.
+ */
+function onColFilter(idx, col) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  const f = getSheetFilter2(name);
+  const cf = f.col;
+
+  if (col === 'fecha') {
+    cf.fecha.min = (document.getElementById(`cff-fecha-min-${idx}`) || {}).value || '';
+    cf.fecha.max = (document.getElementById(`cff-fecha-max-${idx}`) || {}).value || '';
+  } else if (col === 'descripcion_corta') {
+    cf.descripcion_corta.text = (document.getElementById(`cff-descripcion_corta-text-${idx}`) || {}).value || '';
+  } else if (col === 'factura') {
+    cf.factura.text = (document.getElementById(`cff-factura-text-${idx}`) || {}).value || '';
+  } else if (col === 'concepto') {
+    cf.concepto.text = (document.getElementById(`cff-concepto-text-${idx}`) || {}).value || '';
+  } else if (col === 'ingreso') {
+    cf.ingreso.min = (document.getElementById(`cff-ingreso-min-${idx}`) || {}).value || '';
+    cf.ingreso.max = (document.getElementById(`cff-ingreso-max-${idx}`) || {}).value || '';
+  } else if (col === 'egreso') {
+    cf.egreso.min = (document.getElementById(`cff-egreso-min-${idx}`) || {}).value || '';
+    cf.egreso.max = (document.getElementById(`cff-egreso-max-${idx}`) || {}).value || '';
+  }
+
+  applySheetFilters2(name, idx);
+}
+
+/**
+ * Limpia el filtro de columna específico: borra estado + inputs del DOM.
+ */
+function clearColFilter(idx, col) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  const f  = getSheetFilter2(name);
+  const cf = f.col;
+
+  if (col === 'fecha') {
+    cf.fecha.min = ''; cf.fecha.max = '';
+    const mn = document.getElementById(`cff-fecha-min-${idx}`);
+    const mx = document.getElementById(`cff-fecha-max-${idx}`);
+    if (mn) mn.value = ''; if (mx) mx.value = '';
+  } else if (col === 'descripcion_corta') {
+    cf.descripcion_corta.text = '';
+    const el = document.getElementById(`cff-descripcion_corta-text-${idx}`);
+    if (el) el.value = '';
+  } else if (col === 'factura') {
+    cf.factura.text = '';
+    const el = document.getElementById(`cff-factura-text-${idx}`);
+    if (el) el.value = '';
+  } else if (col === 'concepto') {
+    cf.concepto.text = '';
+    const el = document.getElementById(`cff-concepto-text-${idx}`);
+    if (el) el.value = '';
+  } else if (col === 'ingreso') {
+    cf.ingreso.min = ''; cf.ingreso.max = '';
+    const mn = document.getElementById(`cff-ingreso-min-${idx}`);
+    const mx = document.getElementById(`cff-ingreso-max-${idx}`);
+    if (mn) mn.value = ''; if (mx) mx.value = '';
+  } else if (col === 'egreso') {
+    cf.egreso.min = ''; cf.egreso.max = '';
+    const mn = document.getElementById(`cff-egreso-min-${idx}`);
+    const mx = document.getElementById(`cff-egreso-max-${idx}`);
+    if (mn) mn.value = ''; if (mx) mx.value = '';
+  }
+
+  // Cerrar el panel
+  const panel = document.getElementById(`cfp-${col}-${idx}`);
+  if (panel) panel.classList.remove('open');
+
+  applySheetFilters2(name, idx);
+}
+
+/**
+ * Actualiza la clase visual (col-fltr-active) en los botones de filtro
+ * de columna para indicar cuáles tienen un filtro activo.
+ */
+function updateColFilterIndicators2(idx, f) {
+  const cf = (f && f.col) || {};
+  const cols = ['fecha','descripcion_corta','factura','concepto','ingreso','egreso'];
+  for (const col of cols) {
+    const btn = document.getElementById(`cfb-${col}-${idx}`);
+    if (!btn) continue;
+    const s = cf[col];
+    let active = false;
+    if (s) {
+      if (s.text)            active = s.text !== '';
+      if (s.min !== undefined) active = active || s.min !== '' || s.max !== '';
+    }
+    btn.classList.toggle('col-fltr-active', active);
   }
 }
 
