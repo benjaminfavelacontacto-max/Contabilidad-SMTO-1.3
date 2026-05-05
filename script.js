@@ -1595,6 +1595,8 @@ let finalDataset2   = [];   // todos los rows combinados
 let file2FileName   = '';
 let sheetChartInsts = {};   // { sheetName: { bar, donut } }
 let activeSheetTab2 = null;
+let sheetFilters2   = {};   // { sheetName: { year, mes, tipo, search, sortCol, sortDir } }
+let sheetIdxToName2 = {};   // { idx: sheetName } para onclick handlers seguros
 
 // ─── CONFIGURACIÓN DE HOJAS (Sistema de Mapeo Dinámico) ──────────
 // Para agregar nuevas hojas en el futuro, solo agrega una entrada aquí.
@@ -1737,10 +1739,11 @@ function renderSheetsDetected(sheetNames) {
  *  - 8-col: Date, Tipo, Folio, Factura, Concepto, Ingreso, Egreso, Saldo
  *  - 7-col: Date, Tipo, Folio, Concepto, Ingreso, Egreso, Saldo
  *  - 6-col: Date, Folio(largeInt), Concepto, Ingreso, Egreso, Saldo  (Monex Fondo)
+ *  Devuelve también facturaCol para el campo de referencia/factura.
  */
 function detectLayoutPositional(sampleRows) {
   const n = sampleRows.length;
-  if (n === 0) return { ingCol: 5, egrCol: 6, descCols: [1, 4] };
+  if (n === 0) return { ingCol: 5, egrCol: 6, descCols: [1, 4], facturaCol: 3 };
 
   // Caso especial: col 1 = folio de 8+ dígitos (Monex Fondo Ahorro)
   const col1LargeInt = sampleRows.filter(r => {
@@ -1751,7 +1754,8 @@ function detectLayoutPositional(sampleRows) {
   }).length;
 
   if (col1LargeInt > n * 0.6) {
-    return { ingCol: 3, egrCol: 4, descCols: [2] };
+    // 6-col: col1=folio, col2=concepto, col3=ingreso, col4=egreso
+    return { ingCol: 3, egrCol: 4, descCols: [2], facturaCol: 1 };
   }
 
   // Verificar si col 7 tiene valores numéricos (→ formato 8-col)
@@ -1763,38 +1767,52 @@ function detectLayoutPositional(sampleRows) {
   }).length;
 
   if (col7Numeric > n * 0.35) {
-    // 8-col: Ingreso=5, Egreso=6, Saldo=7; Descripción=col4 (+ col1 para tipo)
-    return { ingCol: 5, egrCol: 6, descCols: [1, 4] };
+    // 8-col: col1=Tipo, col2=Folio, col3=Factura, col4=Concepto, col5=Ingreso, col6=Egreso
+    return { ingCol: 5, egrCol: 6, descCols: [1, 4], facturaCol: 3 };
   }
 
-  // 7-col: Ingreso=4, Egreso=5, Saldo=6; Descripción=col3 (+ col1 para tipo)
-  return { ingCol: 4, egrCol: 5, descCols: [1, 3] };
+  // 7-col: col1=Tipo, col2=Folio/Factura, col3=Concepto, col4=Ingreso, col5=Egreso
+  return { ingCol: 4, egrCol: 5, descCols: [1, 3], facturaCol: 2 };
 }
 
-/** Extrae filas de datos dados los índices de columnas. */
-function extractFromCols(rawRows, startRow, cols, sheetName, meta) {
-  const { colFecha, colIngreso, colEgreso, colDesc, colTipo } = cols;
+/** Extrae filas de datos dados los índices de columnas.
+ *  @param {Array}  rawRows       - todas las filas de la hoja
+ *  @param {number} startRow      - primera fila de datos (después del header)
+ *  @param {object} cols          - { colFecha, colIngreso, colEgreso, colDesc, colTipo, colFactura, colConcepto }
+ *  @param {string} sheetName
+ *  @param {object} meta          - { banco, tipo_cuenta, moneda }
+ *  @param {string} tableName     - nombre de la tabla origen (ej. "Tabla 2023")
+ *  @param {number} endRow        - última fila a procesar (exclusiva)
+ *  @param {number|null} yearOverride - año de la tabla (detectado del título, o null)
+ */
+function extractFromCols(rawRows, startRow, cols, sheetName, meta,
+                          tableName = '', endRow = null, yearOverride = null) {
+  const { colFecha, colIngreso, colEgreso, colDesc = -1, colTipo = -1,
+          colFactura = -1, colConcepto = -1 } = cols;
+  const limit  = endRow != null ? Math.min(endRow, rawRows.length) : rawRows.length;
   const result = [];
 
-  for (let i = startRow; i < rawRows.length; i++) {
+  for (let i = startRow; i < limit; i++) {
     const row = rawRows[i];
     if (!row || !row.some(c => c != null && String(c).trim())) continue;
 
-    // Validar fecha
+    // ── Validar fecha ──────────────────────────────────────────────
     const rawFecha = colFecha >= 0 && row[colFecha] != null ? String(row[colFecha]).trim() : '';
     if (!rawFecha) continue;
     const fecha = parseDate(rawFecha);
-    if (!fecha || fecha.getFullYear() < 2000 || fecha.getFullYear() > 2030) continue;
+    if (!fecha || fecha.getFullYear() < 2000 || fecha.getFullYear() > 2035) continue;
 
-    // Descripción
-    const rawDesc = colDesc >= 0 && row[colDesc] ? String(row[colDesc]).trim() : '';
-    const rawTipo = colTipo >= 0 && row[colTipo] ? String(row[colTipo]).trim() : '';
+    // ── Columnas de texto ──────────────────────────────────────────
+    const rawTipo     = colTipo     >= 0 && row[colTipo]     ? String(row[colTipo]).trim()     : '';
+    const rawDesc     = colDesc     >= 0 && row[colDesc]     ? String(row[colDesc]).trim()     : '';
+    const rawFactura  = colFactura  >= 0 && row[colFactura]  ? String(row[colFactura]).trim()  : '';
+    const rawConcepto = colConcepto >= 0 && row[colConcepto] ? String(row[colConcepto]).trim() : '';
 
-    // Omitir filas de totales o resúmenes
-    const textCheck = rawDesc || rawTipo;
+    // ── Omitir filas de totales / resúmenes ────────────────────────
+    const textCheck = rawDesc || rawTipo || rawConcepto;
     if (/^(total|saldo|resumen|subtotal|suma|balance|promedio|tipo de cambio)/i.test(textCheck)) continue;
 
-    // Montos
+    // ── Montos ─────────────────────────────────────────────────────
     const rawIng = colIngreso >= 0 && row[colIngreso] != null ? String(row[colIngreso]) : '';
     const rawEgr = colEgreso  >= 0 && row[colEgreso]  != null ? String(row[colEgreso])  : '';
     const ing = parseMonto(rawIng);
@@ -1808,10 +1826,8 @@ function extractFromCols(rawRows, startRow, cols, sheetName, meta) {
     } else if (!isNaN(egr) && egr > 0 && (isNaN(ing) || ing === 0)) {
       monto = egr; tipo_registro = 'Egreso';
     } else if (!isNaN(ing) && ing < 0) {
-      // Valor negativo en col Ingreso = egreso (ej. créditos con saldo negativo)
       monto = Math.abs(ing); tipo_registro = 'Egreso';
     } else if (!isNaN(egr) && egr < 0) {
-      // Valor negativo en col Egreso = puede ser un ingreso (pago que reduce deuda)
       monto = Math.abs(egr); tipo_registro = 'Ingreso';
     } else if (!isNaN(ing) && ing !== 0) {
       monto = Math.abs(ing); tipo_registro = ing > 0 ? 'Ingreso' : 'Egreso';
@@ -1821,69 +1837,233 @@ function extractFromCols(rawRows, startRow, cols, sheetName, meta) {
 
     if (monto === 0 || !tipo_registro) continue;
 
-    // Construir descripción completa: tipo · concepto (filtrando 'NA')
-    const descParts = [rawTipo, rawDesc].filter(v => v && !/^(NA|na|n\.a\.)$/i.test(v) && v !== '-');
+    // ── Construir campos de texto limpios ──────────────────────────
+    const cleanNA  = v => (v && !/^(NA|na|n\.a\.|-|0)$/i.test(v)) ? v : '';
+    const factura  = cleanNA(rawFactura);
+    const concepto = rawConcepto || rawDesc || '';
+
+    // descripcion_corta = col Tipo/Desc; descripcion = combinación legible
+    const descParts = [rawTipo, concepto].filter(v => cleanNA(v));
     const fullDesc  = descParts.join(' · ') || rawTipo || meta.tipo_cuenta;
+
+    const yearFinal = yearOverride || fecha.getFullYear();
 
     result.push({
       fecha,
-      year:          fecha.getFullYear(),
-      mes:           fecha.getMonth(),
+      year:               yearFinal,
+      mes:                fecha.getMonth(),
       tipo_registro,
-      descripcion:   fullDesc,
+      descripcion:        fullDesc,
+      descripcion_corta:  rawTipo || '',
+      factura,
+      concepto,
       monto,
-      hoja:          sheetName,
-      banco:         meta.banco,
-      tipo_cuenta:   meta.tipo_cuenta,
-      moneda:        meta.moneda,
-      // Compatibilidad con los renderers existentes
-      tipo:          rawTipo || meta.tipo_cuenta,
-      categoria:     meta.banco,
-      subcategoria:  rawDesc || fullDesc,
-      importe:       monto,
-      iva:           0,
-      ret:           0,
+      ingreso:            tipo_registro === 'Ingreso' ? monto : 0,
+      egreso:             tipo_registro === 'Egreso'  ? monto : 0,
+      hoja:               sheetName,
+      banco:              meta.banco,
+      tipo_cuenta:        meta.tipo_cuenta,
+      moneda:             meta.moneda,
+      tabla_origen:       tableName || '',
+      // Compatibilidad con renderers existentes (Módulo 1)
+      tipo:               rawTipo || meta.tipo_cuenta,
+      categoria:          meta.banco,
+      subcategoria:       concepto || fullDesc,
+      importe:            monto,
+      iva:                0,
+      ret:                0,
     });
   }
   return result;
 }
 
-/** Normaliza una hoja completa (con o sin fila de encabezado). */
-function normalizeSheetRows(rawRows, sheetName, meta) {
-  if (!rawRows || rawRows.length === 0) return [];
+// ══════════════════════════════════════════════════════════════════
+// DETECCIÓN DE MÚLTIPLES TABLAS POR HOJA
+// Cada hoja puede contener N tablas (una por año) con estructura:
+//   Título: "Bancomer Cheques SMTO 2023"
+//   Header: Fecha | Desc | Factura | Concepto | Ingreso | Egreso
+//   Datos:  filas de movimientos
+//   Totales: fila de sumas (NO se procesa como movimiento)
+// ══════════════════════════════════════════════════════════════════
 
-  // ── Intento 1: buscar fila de encabezado con INGRESO/EGRESO explícitos ──
-  for (let hi = 0; hi < Math.min(rawRows.length, 20); hi++) {
-    const row = rawRows[hi];
+/** Palabras clave para identificar columnas de encabezado. */
+const HDR_FECHA    = ['FECHA','DATE','FECHA OPERACION','FECHA VALOR'];
+const HDR_INGRESO  = ['INGRESO','ABONO','CRÉDITO','CREDITO','ABONOS','INGRESOS'];
+const HDR_EGRESO   = ['EGRESO','CARGO','DÉBITO','DEBITO','CARGOS','EGRESOS'];
+const HDR_CONCEPTO = ['CONCEPTO','DESCRIPCIÓN','DESCRIPCION','DETALLE','CONCEPTO/DESCRIPCIÓN'];
+const HDR_FACTURA  = ['FACTURA','FOLIO','REF','REFERENCIA','NO. FACTURA','NÚMERO','NUMERO'];
+const HDR_DESC     = ['DESC','TIPO','DESCRIPCION CORTA','TIPO MOVIMIENTO'];
+
+/** Nombres de meses en español para detectar tablas resumen. */
+const SUMMARY_MONTHS = [
+  'ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO',
+  'JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE',
+  'ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC',
+];
+
+/** ¿Es una fila de resumen mensual (NO procesar)? */
+function isSummaryTableHeader(row) {
+  const vals = row.map(c => String(c || '').toUpperCase().trim());
+  return vals.filter(v => SUMMARY_MONTHS.includes(v)).length >= 3;
+}
+
+/** ¿Parece un encabezado de tabla de movimientos? */
+function looksLikeDataTableHeader(row) {
+  const vals = row.map(c => String(c || '').toUpperCase().trim());
+  const hasFecha = vals.some(v => HDR_FECHA.includes(v) || v.includes('FECHA'));
+  const hasIng   = vals.some(v => HDR_INGRESO.includes(v));
+  const hasEgr   = vals.some(v => HDR_EGRESO.includes(v));
+  return hasFecha && (hasIng || hasEgr);
+}
+
+/** Busca un año (2020-2035) en las filas anteriores al header de tabla. */
+function extractTableYear(rawRows, headerRowIdx) {
+  for (let i = Math.max(0, headerRowIdx - 6); i < headerRowIdx; i++) {
+    const row = rawRows[i];
     if (!row) continue;
-    const rowUpper = row.map(c => String(c || '').toUpperCase().trim());
-    const hasIng = rowUpper.some(c => c === 'INGRESO' || c === 'ABONO' || c === 'CRÉDITO' || c === 'CREDITO');
-    const hasEgr = rowUpper.some(c => c === 'EGRESO'  || c === 'CARGO'  || c === 'DÉBITO'  || c === 'DEBITO');
+    for (const cell of row) {
+      const m = String(cell || '').match(/\b(202[0-9]|203[0-5])\b/);
+      if (m) return parseInt(m[1], 10);
+    }
+  }
+  return null;
+}
 
-    if (hasIng && hasEgr) {
-      const colFecha   = rowUpper.findIndex(c => c.includes('FECHA') || c === 'DATE');
-      const colIngreso = rowUpper.findIndex(c => c === 'INGRESO' || c === 'ABONO' || c === 'CRÉDITO' || c === 'CREDITO');
-      const colEgreso  = rowUpper.findIndex(c => c === 'EGRESO'  || c === 'CARGO' || c === 'DÉBITO'  || c === 'DEBITO');
-      const colDesc    = rowUpper.findIndex(c => c === 'CONCEPTO' || c === 'DESCRIPCIÓN' || c === 'DESCRIPCION' || c === 'DETALLE' || c === 'DESC');
-      const colTipo    = rowUpper.findIndex(c => c === 'TIPO' || c === 'TYPE');
+/**
+ * Detecta y describe TODAS las tablas de movimientos en una hoja.
+ * Ignora tablas de resumen (columnas = meses).
+ * @returns {Array<{headerRowIdx, dataStartIdx, dataEndIdx, yearDetected,
+ *                  colFecha, colDesc, colFactura, colConcepto, colIngreso, colEgreso, tableName}>}
+ */
+function detectTablesInSheet(rawRows) {
+  const tables = [];
+  let i = 0;
 
-      return extractFromCols(rawRows, hi + 1, {
-        colFecha:   colFecha   >= 0 ? colFecha   : 0,
-        colIngreso: colIngreso >= 0 ? colIngreso : 5,
-        colEgreso:  colEgreso  >= 0 ? colEgreso  : 6,
-        colDesc:    colDesc    >= 0 ? colDesc    : 4,
-        colTipo:    colTipo    >= 0 ? colTipo    : 1,
-      }, sheetName, meta);
+  while (i < rawRows.length) {
+    const row = rawRows[i];
+    if (!row || !row.some(c => c != null && String(c).trim())) { i++; continue; }
+
+    if (looksLikeDataTableHeader(row) && !isSummaryTableHeader(row)) {
+      const vals = row.map(c => String(c || '').toUpperCase().trim());
+
+      // ── Mapear columnas desde el header ───────────────────────
+      const findCol = (keywords) => vals.findIndex(v => keywords.includes(v));
+
+      const colFecha   = (() => {
+        let idx = vals.findIndex(v => HDR_FECHA.includes(v));
+        if (idx < 0) idx = vals.findIndex(v => v.includes('FECHA'));
+        return idx >= 0 ? idx : 0;
+      })();
+      const colIngreso = findCol(HDR_INGRESO);
+      const colEgreso  = findCol(HDR_EGRESO);
+
+      // DESC y CONCEPTO: cuidado de no asignar el mismo índice
+      let colDesc     = findCol(HDR_DESC);
+      let colConcepto = findCol(HDR_CONCEPTO);
+      if (colConcepto === colDesc && colConcepto >= 0) colConcepto = -1;
+
+      // Si no hay DESC separado, usar el primer campo textual
+      if (colDesc < 0 && colConcepto >= 0) {
+        // busca otra columna de texto que no sea fecha/ingreso/egreso
+        colDesc = vals.findIndex((v, idx) =>
+          idx !== colFecha && idx !== colIngreso && idx !== colEgreso &&
+          idx !== colConcepto && v && v.length > 0 &&
+          !['$','SALDO','BALANCE','TIPO DE CAMBIO'].includes(v)
+        );
+      }
+
+      let colFactura = findCol(HDR_FACTURA);
+
+      const yearDetected = extractTableYear(rawRows, i);
+      const headerRowIdx = i;
+      const dataStartIdx = i + 1;
+
+      // ── Buscar fin de tabla ────────────────────────────────────
+      let emptyRun   = 0;
+      let dataEndIdx = rawRows.length;
+
+      for (let j = dataStartIdx; j < rawRows.length; j++) {
+        const jrow = rawRows[j];
+        if (!jrow || !jrow.some(c => c != null && String(c).trim())) {
+          emptyRun++;
+          if (emptyRun >= 3) { dataEndIdx = j - emptyRun + 1; break; }
+        } else {
+          emptyRun = 0;
+          // Nuevo encabezado de tabla → termina la actual
+          if (j > headerRowIdx + 3 && looksLikeDataTableHeader(jrow) && !isSummaryTableHeader(jrow)) {
+            dataEndIdx = j;
+            break;
+          }
+        }
+      }
+
+      tables.push({
+        headerRowIdx,
+        dataStartIdx,
+        dataEndIdx,
+        yearDetected,
+        colFecha,
+        colDesc,
+        colFactura,
+        colConcepto,
+        colIngreso:  colIngreso >= 0 ? colIngreso : 5,
+        colEgreso:   colEgreso  >= 0 ? colEgreso  : 6,
+        tableName:   yearDetected ? `Tabla ${yearDetected}` : `Tabla ${tables.length + 1}`,
+      });
+
+      i = dataEndIdx;
+    } else {
+      i++;
     }
   }
 
-  // ── Intento 2: detección posicional (sin encabezado explícito) ──
+  return tables;
+}
+
+/**
+ * Normaliza una hoja completa.
+ * Primero intenta detectar MÚLTIPLES TABLAS con encabezados explícitos.
+ * Si no encuentra ninguna, cae al modo posicional (hojas sin headers).
+ */
+function normalizeSheetRows(rawRows, sheetName, meta) {
+  if (!rawRows || rawRows.length === 0) return [];
+
+  // ── INTENTO 1: Detección multi-tabla con encabezados explícitos ──
+  const tables = detectTablesInSheet(rawRows);
+
+  if (tables.length > 0) {
+    const allExtracted = [];
+    for (const tbl of tables) {
+      const rows = extractFromCols(
+        rawRows,
+        tbl.dataStartIdx,
+        {
+          colFecha:    tbl.colFecha,
+          colIngreso:  tbl.colIngreso,
+          colEgreso:   tbl.colEgreso,
+          colDesc:     tbl.colDesc     >= 0 ? tbl.colDesc     : tbl.colConcepto,
+          colTipo:     tbl.colDesc     >= 0 ? tbl.colDesc     : -1,
+          colFactura:  tbl.colFactura  >= 0 ? tbl.colFactura  : -1,
+          colConcepto: tbl.colConcepto >= 0 ? tbl.colConcepto : tbl.colDesc,
+        },
+        sheetName,
+        meta,
+        tbl.tableName,
+        tbl.dataEndIdx,
+        tbl.yearDetected,
+      );
+      allExtracted.push(...rows);
+    }
+    return allExtracted;
+  }
+
+  // ── INTENTO 2: Detección posicional (hojas sin headers explícitos) ──
   let startRow = -1;
   for (let i = 0; i < Math.min(rawRows.length, 300); i++) {
     const row = rawRows[i];
     if (!row || !row[0]) continue;
     const date = parseDate(row[0]);
-    if (date && date.getFullYear() >= 2000 && date.getFullYear() <= 2030) {
+    if (date && date.getFullYear() >= 2000 && date.getFullYear() <= 2035) {
       startRow = i;
       break;
     }
@@ -1893,13 +2073,24 @@ function normalizeSheetRows(rawRows, sheetName, meta) {
   const sampleRows = rawRows.slice(startRow, startRow + 10).filter(r => r && r[0]);
   const layout     = detectLayoutPositional(sampleRows);
 
-  return extractFromCols(rawRows, startRow, {
-    colFecha:   0,
-    colIngreso: layout.ingCol,
-    colEgreso:  layout.egrCol,
-    colDesc:    layout.descCols[layout.descCols.length - 1],
-    colTipo:    layout.descCols.length > 1 ? layout.descCols[0] : -1,
-  }, sheetName, meta);
+  return extractFromCols(
+    rawRows,
+    startRow,
+    {
+      colFecha:    0,
+      colIngreso:  layout.ingCol,
+      colEgreso:   layout.egrCol,
+      colDesc:     layout.descCols[layout.descCols.length - 1],
+      colTipo:     layout.descCols.length > 1 ? layout.descCols[0] : -1,
+      colFactura:  layout.facturaCol,
+      colConcepto: layout.descCols[layout.descCols.length - 1],
+    },
+    sheetName,
+    meta,
+    '',
+    rawRows.length,
+    null,
+  );
 }
 
 /** Ejecuta la transformación de todas las hojas. */
@@ -2181,9 +2372,9 @@ function renderAllSheetDashboards() {
   sheetNames.forEach((name, i) => {
     const meta = classifySheet(name);
     const btn  = document.createElement('button');
-    btn.className    = 'sheet-tab-btn' + (i === 0 ? ' active' : '');
+    btn.className     = 'sheet-tab-btn' + (i === 0 ? ' active' : '');
     btn.dataset.sheet = name;
-    btn.innerHTML    = `
+    btn.innerHTML     = `
       <span class="sheet-tab-name" title="${escHtml(name)}">${escHtml(name)}</span>
       <span class="sheet-tab-moneda sheet-pill-moneda-${meta.moneda}">${meta.moneda}</span>`;
     btn.addEventListener('click', () => switchSheetTab(name));
@@ -2193,84 +2384,95 @@ function renderAllSheetDashboards() {
   // Dashboard panels
   const container = document.getElementById('sheetDashboardsContainer');
   container.innerHTML = '';
-  sheetChartInsts = {};
+  sheetChartInsts  = {};
+  sheetFilters2    = {};
+  sheetIdxToName2  = {};
 
   sheetNames.forEach((name, i) => {
+    sheetIdxToName2[i] = name;
     const panel = document.createElement('div');
-    panel.className   = 'sheet-dashboard-panel' + (i === 0 ? ' active' : '');
+    panel.className     = 'sheet-dashboard-panel' + (i === 0 ? ' active' : '');
     panel.dataset.sheet = name;
-    panel.id          = `sheet-panel-${i}`;
-    panel.innerHTML   = buildSheetDashboardHTML(name, i);
+    panel.id            = `sheet-panel-${i}`;
+    panel.innerHTML     = buildSheetDashboardHTML(name, i);
     container.appendChild(panel);
   });
 
-  // Renderizar charts de la primera hoja
+  // Inicializar filtros + tabla de TODAS las hojas (renderiza en background)
+  sheetNames.forEach((name, i) => initSheetFilters2(name, i));
+
+  // Renderizar charts solo de la hoja activa
   if (sheetNames.length > 0) {
     activeSheetTab2 = sheetNames[0];
     renderSheetCharts(sheetNames[0], 0);
   }
 }
 
-/** Genera el HTML interno del dashboard de una hoja. */
+/**
+ * Genera el HTML esqueleto del dashboard por hoja.
+ * KPIs y tabla se renderizan dinámicamente via initSheetFilters2 → applySheetFilters2.
+ */
 function buildSheetDashboardHTML(sheetName, idx) {
   const meta  = classifySheet(sheetName);
   const rows  = processedData2[sheetName] || [];
-  const ing   = rows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
-  const egr   = rows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
-  const bal   = ing - egr;
-  const years = [...new Set(rows.map(r => r.year).filter(Boolean))].sort().join(', ');
+  const years = [...new Set(rows.map(r => r.year).filter(Boolean))].sort();
+  const yearStr = years.join(', ');
 
-  // Tabla de movimientos (máximo 50 más recientes)
-  const sorted  = [...rows].sort((a, b) => {
-    if (!a.fecha && !b.fecha) return 0;
-    if (!a.fecha) return 1;
-    if (!b.fecha) return -1;
-    return b.fecha - a.fecha;
-  });
-  const tableRows = sorted.slice(0, 50).map(r => {
-    const isInc = r.tipo_registro === 'Ingreso';
-    return `<tr>
-      <td class="td-date">${escHtml(formatDate(r.fecha))}</td>
-      <td class="td-nombre" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;">${escHtml(r.descripcion)}</td>
-      <td class="text-right ${isInc ? 'td-total-inc' : 'td-total-egr'}">${isInc ? '+' : '-'}${formatMoney(r.monto)}</td>
-      <td><span class="type-badge ${isInc ? 'type-income' : 'type-expense'}">${r.tipo_registro}</span></td>
-    </tr>`;
-  }).join('');
+  // ── Opciones del selector de año ──────────────────────────────
+  const yearOpts = years.map(y =>
+    `<option value="${y}">${y}</option>`
+  ).join('');
+
+  // ── Opciones del selector de mes ──────────────────────────────
+  const mesOpts = MONTHS_LONG.map((m, mi) =>
+    `<option value="${mi}">${m}</option>`
+  ).join('');
 
   return `
     <div class="sheet-dash-header">
       <div>
         <h3 class="sheet-dash-title">${escHtml(sheetName)}</h3>
-        <p class="sheet-dash-subtitle">${escHtml(meta.banco)} · ${escHtml(meta.tipo_cuenta)} · ${meta.moneda}${years ? ' · ' + years : ''}</p>
+        <p class="sheet-dash-subtitle">${escHtml(meta.banco)} · ${escHtml(meta.tipo_cuenta)} · ${meta.moneda}${yearStr ? ' · ' + yearStr : ''}</p>
       </div>
-      <span class="table-badge">${rows.length.toLocaleString('es-MX')} movimientos</span>
+      <span class="table-badge" id="sheet-badge-${idx}">${rows.length.toLocaleString('es-MX')} movimientos</span>
     </div>
 
-    <div class="kpi-grid sheet-kpi-grid">
-      <div class="kpi-card kpi-income">
-        <div class="kpi-label">Ingresos</div>
-        <div class="kpi-value">${formatMoney(ing)}</div>
-        <div class="kpi-detail">${rows.filter(r => r.tipo_registro === 'Ingreso').length.toLocaleString('es-MX')} movimientos</div>
-      </div>
-      <div class="kpi-card kpi-expense">
-        <div class="kpi-label">Egresos</div>
-        <div class="kpi-value">${formatMoney(egr)}</div>
-        <div class="kpi-detail">${rows.filter(r => r.tipo_registro === 'Egreso').length.toLocaleString('es-MX')} movimientos</div>
-      </div>
-      <div class="kpi-card kpi-balance">
-        <div class="kpi-label">Balance</div>
-        <div class="kpi-value" style="color:${bal >= 0 ? 'var(--income)' : 'var(--expense)'}">
-          ${formatMoney(bal)}
+    <!-- ── Barra de filtros ──────────────────────────────────── -->
+    <div class="sfb-wrap">
+      <div class="sfb-left">
+        <select class="sfb-select" id="sfb-year-${idx}"
+          onchange="onSheetYearChange(${idx}, this.value)">
+          <option value="all">Todos los años</option>
+          ${yearOpts}
+        </select>
+        <select class="sfb-select" id="sfb-mes-${idx}"
+          onchange="onSheetMesChange(${idx}, this.value)">
+          <option value="all">Todos los meses</option>
+          ${mesOpts}
+        </select>
+        <div class="sfb-quick-wrap">
+          <button class="sfb-quick sfb-active" id="sfb-todos-${idx}"
+            onclick="setSheetTipo(${idx}, 'all', this)">Ver todo</button>
+          <button class="sfb-quick sfb-income" id="sfb-ing-${idx}"
+            onclick="setSheetTipo(${idx}, 'Ingreso', this)">↑ Ingresos</button>
+          <button class="sfb-quick sfb-expense" id="sfb-egr-${idx}"
+            onclick="setSheetTipo(${idx}, 'Egreso', this)">↓ Egresos</button>
         </div>
-        <div class="kpi-detail">${bal >= 0 ? '✓ Positivo' : '⚠ Negativo'}</div>
       </div>
-      <div class="kpi-card kpi-rate">
-        <div class="kpi-label">Movimientos</div>
-        <div class="kpi-value">${rows.length.toLocaleString('es-MX')}</div>
-        <div class="kpi-detail">${years || 'Sin fechas'}</div>
+      <div class="sfb-right">
+        <div class="sfb-search-wrap">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" class="sfb-search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" class="sfb-search" id="sfb-search-${idx}"
+            placeholder="Buscar en todos los campos…"
+            oninput="onSheetSearch(${idx}, this.value)">
+        </div>
       </div>
     </div>
 
+    <!-- ── KPIs dinámicos ────────────────────────────────────── -->
+    <div class="kpi-grid sheet-kpi-grid" id="sheet-kpis-${idx}"></div>
+
+    <!-- ── Gráficas ──────────────────────────────────────────── -->
     <div class="charts-grid">
       <div class="chart-card chart-bar-card">
         <div class="chart-header">
@@ -2284,31 +2486,286 @@ function buildSheetDashboardHTML(sheetName, idx) {
       </div>
       <div class="chart-card chart-donut-card">
         <div class="chart-header">
-          <h3 class="chart-title">Top Movimientos por Tipo</h3>
+          <h3 class="chart-title">Distribución por Tipo</h3>
         </div>
         <div class="chart-body donut-body"><canvas id="sheet-donut-${idx}"></canvas></div>
       </div>
     </div>
 
+    <!-- ── Tabla interactiva ──────────────────────────────────── -->
     <div class="table-card">
       <div class="table-header">
-        <h3 class="chart-title">Últimos ${Math.min(50, rows.length)} movimientos</h3>
-        <span class="table-badge">${rows.length.toLocaleString('es-MX')} total</span>
+        <h3 class="chart-title">Movimientos</h3>
+        <span class="table-badge" id="sheet-tbl-badge-${idx}">${rows.length.toLocaleString('es-MX')} registros</span>
       </div>
       <div class="table-wrapper tx-table-wrapper">
-        <table class="data-table">
+        <table class="data-table sheet-detail-table" id="sheet-table-${idx}">
           <thead>
             <tr>
-              <th>Fecha</th>
-              <th>Descripción</th>
-              <th class="text-right">Monto</th>
-              <th>Tipo</th>
+              <th class="sort-th" onclick="sortSheetTable(${idx}, 'fecha')">
+                Fecha <span class="sort-icon" id="sh-si-fecha-${idx}">⇅</span>
+              </th>
+              <th class="sort-th" onclick="sortSheetTable(${idx}, 'descripcion_corta')">
+                Desc <span class="sort-icon" id="sh-si-descripcion_corta-${idx}">⇅</span>
+              </th>
+              <th class="sort-th" onclick="sortSheetTable(${idx}, 'factura')">
+                Factura <span class="sort-icon" id="sh-si-factura-${idx}">⇅</span>
+              </th>
+              <th class="sort-th" onclick="sortSheetTable(${idx}, 'concepto')">
+                Concepto <span class="sort-icon" id="sh-si-concepto-${idx}">⇅</span>
+              </th>
+              <th class="sort-th text-right" onclick="sortSheetTable(${idx}, 'ingreso')">
+                Ingreso <span class="sort-icon" id="sh-si-ingreso-${idx}">⇅</span>
+              </th>
+              <th class="sort-th text-right" onclick="sortSheetTable(${idx}, 'egreso')">
+                Egreso <span class="sort-icon" id="sh-si-egreso-${idx}">⇅</span>
+              </th>
             </tr>
           </thead>
-          <tbody>${tableRows}</tbody>
+          <tbody id="sheet-tbody-${idx}">
+            <tr><td colspan="6" class="tx-empty">Cargando…</td></tr>
+          </tbody>
+          <tfoot id="sheet-tfoot-${idx}"></tfoot>
         </table>
       </div>
     </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// FILTROS INTERACTIVOS POR HOJA
+// Estado: sheetFilters2[sheetName] = { year, mes, tipo, search, sortCol, sortDir }
+// Lookup: sheetIdxToName2[idx] = sheetName (evita problemas de HTML escaping)
+// ══════════════════════════════════════════════════════════════════
+
+function getSheetFilter2(sheetName) {
+  if (!sheetFilters2[sheetName]) {
+    sheetFilters2[sheetName] = {
+      year: 'all', mes: 'all', tipo: 'all',
+      search: '', sortCol: 'fecha', sortDir: 'desc',
+    };
+  }
+  return sheetFilters2[sheetName];
+}
+
+/** Inicializa el estado por defecto y renderiza la tabla + KPIs. */
+function initSheetFilters2(sheetName, idx) {
+  getSheetFilter2(sheetName);
+  applySheetFilters2(sheetName, idx);
+}
+
+/** Filtra, ordena y re-renderiza tabla + KPIs para una hoja. */
+function applySheetFilters2(sheetName, idx) {
+  const f    = getSheetFilter2(sheetName);
+  let rows   = processedData2[sheetName] || [];
+
+  // ── Filtros globales ───────────────────────────────────────────
+  if (f.year !== 'all') rows = rows.filter(r => String(r.year) === String(f.year));
+  if (f.mes  !== 'all') rows = rows.filter(r => String(r.mes)  === String(f.mes));
+  if (f.tipo !== 'all') rows = rows.filter(r => r.tipo_registro === f.tipo);
+
+  // ── Búsqueda de texto ──────────────────────────────────────────
+  if (f.search) {
+    const s = f.search.toLowerCase();
+    rows = rows.filter(r =>
+      (r.concepto           || '').toLowerCase().includes(s) ||
+      (r.descripcion_corta  || '').toLowerCase().includes(s) ||
+      (r.factura            || '').toLowerCase().includes(s) ||
+      (r.descripcion        || '').toLowerCase().includes(s) ||
+      (r.fecha ? formatDate(r.fecha).toLowerCase().includes(s) : false)
+    );
+  }
+
+  // ── Ordenamiento ───────────────────────────────────────────────
+  const col = f.sortCol;
+  const dir = f.sortDir === 'asc' ? 1 : -1;
+  rows = [...rows].sort((a, b) => {
+    let va, vb;
+    if      (col === 'fecha')   { va = a.fecha ? a.fecha.getTime() : 0; vb = b.fecha ? b.fecha.getTime() : 0; }
+    else if (col === 'ingreso' || col === 'egreso') { va = a[col] || 0; vb = b[col] || 0; }
+    else { va = String(a[col] || '').toLowerCase(); vb = String(b[col] || '').toLowerCase(); }
+    return va < vb ? -1 * dir : va > vb ? 1 * dir : 0;
+  });
+
+  renderSheetKPIs2(sheetName, idx, rows);
+  renderSheetTableBody2(sheetName, idx, rows);
+  updateSortIcons2(idx, f);
+}
+
+/** Renderiza KPIs reactivos según las filas filtradas. */
+function renderSheetKPIs2(sheetName, idx, filteredRows) {
+  const totalRows = processedData2[sheetName] || [];
+  const ing  = filteredRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
+  const egr  = filteredRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
+  const bal  = ing - egr;
+  const nIng = filteredRows.filter(r => r.tipo_registro === 'Ingreso').length;
+  const nEgr = filteredRows.filter(r => r.tipo_registro === 'Egreso').length;
+  const nota = filteredRows.length < totalRows.length
+    ? `de ${totalRows.length.toLocaleString('es-MX')} total`
+    : 'total';
+
+  const kpisEl = document.getElementById(`sheet-kpis-${idx}`);
+  if (!kpisEl) return;
+  kpisEl.innerHTML = `
+    <div class="kpi-card kpi-income">
+      <div class="kpi-label">Ingresos</div>
+      <div class="kpi-value">${formatMoney(ing)}</div>
+      <div class="kpi-detail">${nIng.toLocaleString('es-MX')} movimientos</div>
+    </div>
+    <div class="kpi-card kpi-expense">
+      <div class="kpi-label">Egresos</div>
+      <div class="kpi-value">${formatMoney(egr)}</div>
+      <div class="kpi-detail">${nEgr.toLocaleString('es-MX')} movimientos</div>
+    </div>
+    <div class="kpi-card kpi-balance">
+      <div class="kpi-label">Balance</div>
+      <div class="kpi-value" style="color:${bal >= 0 ? 'var(--income)' : 'var(--expense)'}">${formatMoney(bal)}</div>
+      <div class="kpi-detail">${bal >= 0 ? '✓ Positivo' : '⚠ Negativo'}</div>
+    </div>
+    <div class="kpi-card kpi-rate">
+      <div class="kpi-label">Movimientos</div>
+      <div class="kpi-value">${filteredRows.length.toLocaleString('es-MX')}</div>
+      <div class="kpi-detail">${nota}</div>
+    </div>`;
+
+  const badge = document.getElementById(`sheet-badge-${idx}`);
+  if (badge) badge.textContent =
+    `${filteredRows.length.toLocaleString('es-MX')} de ${totalRows.length.toLocaleString('es-MX')} movimientos`;
+}
+
+/** Renderiza tbody + tfoot con totales dinámicos. */
+function renderSheetTableBody2(sheetName, idx, rows) {
+  const tbody = document.getElementById(`sheet-tbody-${idx}`);
+  const tfoot = document.getElementById(`sheet-tfoot-${idx}`);
+  const badge = document.getElementById(`sheet-tbl-badge-${idx}`);
+  if (!tbody) return;
+
+  if (badge) badge.textContent = `${rows.length.toLocaleString('es-MX')} registros`;
+
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="tx-empty">Sin resultados para los filtros seleccionados</td></tr>`;
+    if (tfoot) tfoot.innerHTML = '';
+    return;
+  }
+
+  // Límite de filas en DOM para rendimiento (datasets grandes → usar filtros)
+  const MAX_ROWS = 2000;
+  const displayRows = rows.slice(0, MAX_ROWS);
+  const truncated   = rows.length > MAX_ROWS;
+
+  // Renderizar las filas visibles
+  tbody.innerHTML = displayRows.map(r => {
+    const isIng = r.tipo_registro === 'Ingreso';
+    const fechaStr   = r.fecha ? formatDate(r.fecha) : '—';
+    const descCorta  = escHtml(r.descripcion_corta || '');
+    const factStr    = escHtml(r.factura || '');
+    const concStr    = escHtml(r.concepto || r.descripcion || '');
+    const ingStr     = isIng ? formatMoney(r.monto) : '';
+    const egrStr     = isIng ? '' : formatMoney(r.monto);
+    return `<tr>
+      <td class="td-date">${fechaStr}</td>
+      <td class="td-nombre">${descCorta}</td>
+      <td class="td-ref">${factStr}</td>
+      <td class="td-nombre td-concepto" title="${concStr}">${concStr}</td>
+      <td class="text-right td-total-inc">${ingStr}</td>
+      <td class="text-right td-total-egr">${egrStr}</td>
+    </tr>`;
+  }).join('');
+
+  // Nota de truncado si hay más filas que el límite
+  if (truncated) {
+    tbody.innerHTML += `<tr><td colspan="6" class="tx-truncate-note">
+      ⚠ Mostrando primeros ${MAX_ROWS.toLocaleString('es-MX')} de ${rows.length.toLocaleString('es-MX')} registros.
+      Usa los filtros de año, mes o búsqueda para ver registros específicos.
+    </td></tr>`;
+  }
+
+  // ── Footer con totales dinámicos (sobre TODOS los rows filtrados, no solo los visibles) ──
+  const totalIng = rows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
+  const totalEgr = rows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
+  const balance  = totalIng - totalEgr;
+  const balColor = balance >= 0 ? 'var(--income)' : 'var(--expense)';
+
+  if (tfoot) {
+    tfoot.innerHTML = `
+      <tr class="tfoot-totals">
+        <td colspan="4">
+          <strong>TOTALES — ${rows.length.toLocaleString('es-MX')} movimientos</strong>
+        </td>
+        <td class="text-right td-total-inc"><strong>${formatMoney(totalIng)}</strong></td>
+        <td class="text-right td-total-egr"><strong>${formatMoney(totalEgr)}</strong></td>
+      </tr>
+      <tr class="tfoot-balance">
+        <td colspan="4"><strong>BALANCE NETO</strong></td>
+        <td colspan="2" class="text-right" style="color:${balColor}">
+          <strong>${formatMoney(balance)}</strong>
+        </td>
+      </tr>`;
+  }
+}
+
+// ─── Handlers de filtros ──────────────────────────────────────────
+
+function setSheetTipo(idx, tipo, btn) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  getSheetFilter2(name).tipo = tipo;
+  // Actualizar botón activo
+  ['todos','ing','egr'].forEach(k => {
+    const b = document.getElementById(`sfb-${k}-${idx}`);
+    if (b) b.classList.remove('sfb-active');
+  });
+  if (btn) btn.classList.add('sfb-active');
+  applySheetFilters2(name, idx);
+}
+
+function onSheetSearch(idx, val) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  getSheetFilter2(name).search = val.trim();
+  applySheetFilters2(name, idx);
+}
+
+function onSheetYearChange(idx, val) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  getSheetFilter2(name).year = val;
+  applySheetFilters2(name, idx);
+  renderSheetCharts(name, idx);  // refrescar gráficas con el año seleccionado
+}
+
+function onSheetMesChange(idx, val) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  getSheetFilter2(name).mes = val;
+  applySheetFilters2(name, idx);
+}
+
+function sortSheetTable(idx, col) {
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  const f = getSheetFilter2(name);
+  if (f.sortCol === col) {
+    f.sortDir = f.sortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    f.sortCol = col;
+    f.sortDir = (col === 'ingreso' || col === 'egreso' || col === 'fecha') ? 'desc' : 'asc';
+  }
+  applySheetFilters2(name, idx);
+}
+
+function updateSortIcons2(idx, f) {
+  const cols = ['fecha','descripcion_corta','factura','concepto','ingreso','egreso'];
+  for (const col of cols) {
+    const el = document.getElementById(`sh-si-${col}-${idx}`);
+    if (!el) continue;
+    if (f.sortCol === col) {
+      el.textContent = f.sortDir === 'asc' ? '↑' : '↓';
+      el.className   = 'sort-icon sort-active';
+    } else {
+      el.textContent = '⇅';
+      el.className   = 'sort-icon';
+    }
+  }
 }
 
 /** Cambia la hoja activa en los dashboards. */
@@ -2328,9 +2785,11 @@ function switchSheetTab(sheetName) {
   if (idx >= 0) renderSheetCharts(sheetName, idx);
 }
 
-/** Renderiza las gráficas de una hoja específica. */
+/** Renderiza las gráficas de una hoja respetando el filtro de año activo. */
 function renderSheetCharts(sheetName, idx) {
-  const rows   = processedData2[sheetName] || [];
+  const f    = getSheetFilter2(sheetName);
+  let rows   = processedData2[sheetName] || [];
+  if (f.year !== 'all') rows = rows.filter(r => String(r.year) === String(f.year));
   const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
   const grid   = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
   const tick   = isDark ? '#64748b' : '#94a3b8';
@@ -2491,11 +2950,13 @@ function hideImport2Error() {
 
 // ─── RESET MÓDULO 2 ──────────────────────────────────────────────
 function resetImport2() {
-  rawDataFile2   = {};
-  processedData2 = {};
-  finalDataset2  = [];
-  file2FileName  = '';
+  rawDataFile2    = {};
+  processedData2  = {};
+  finalDataset2   = [];
+  file2FileName   = '';
   activeSheetTab2 = null;
+  sheetFilters2   = {};
+  sheetIdxToName2 = {};
 
   // Destruir chart instances
   for (const insts of Object.values(sheetChartInsts)) {
