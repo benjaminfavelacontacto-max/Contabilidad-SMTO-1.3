@@ -2425,57 +2425,275 @@ function renderConsolidationTable(rows) {
 // ─── ETAPA 3: EXPORTAR EXCEL ──────────────────────────────────────
 
 /** Genera y descarga el Excel consolidado con múltiples hojas. */
-function exportConsolidatedExcel() {
+async function exportConsolidatedExcel() {
   if (!finalDataset2.length) {
     showImport2Error('No hay datos consolidados. Completa la etapa de consolidación primero.');
     return;
   }
 
-  const wb = XLSX.utils.book_new();
+  // ── Paleta de colores premium ─────────────────────────────────────
+  const C = {
+    GREEN_DARK:  '10B981',  // encabezados
+    GREEN_MED:   'D1FAE5',  // filas ingreso
+    RED_LIGHT:   'FEE2E2',  // filas egreso
+    GREY_LIGHT:  'F8FAFC',  // filas alternadas
+    WHITE:       'FFFFFF',
+    TEXT_DARK:   '0F172A',
+    TEXT_GREEN:  '065F46',
+    TEXT_RED:    '991B1B',
+    TOTAL_BG:    'E2E8F0',
+    TOTAL_FONT:  '1E293B',
+  };
 
-  // ── Hoja 1: Concentrado (todos los movimientos) ──
+  // ── Helpers de estilo ─────────────────────────────────────────────
+  const headerStyle = {
+    fill:      { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + C.GREEN_DARK } },
+    font:      { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Calibri', size: 11 },
+    alignment: { horizontal: 'center', vertical: 'middle', wrapText: false },
+    border:    { bottom: { style: 'medium', color: { argb: 'FF' + C.TEXT_DARK } } },
+  };
+  const applyHeader = (row) => {
+    row.height = 20;
+    row.eachCell(cell => Object.assign(cell, { style: headerStyle }));
+  };
+  const rowStyle = (tipo, isAlt) => ({
+    fill: {
+      type: 'pattern', pattern: 'solid',
+      fgColor: { argb: 'FF' + (tipo === 'Ingreso' ? C.GREEN_MED : tipo === 'Egreso' ? RED_LIGHT_SOFT(isAlt) : (isAlt ? C.GREY_LIGHT : C.WHITE)) }
+    },
+    font:      { name: 'Calibri', size: 10, color: { argb: 'FF' + C.TEXT_DARK } },
+    alignment: { vertical: 'middle' },
+  });
+  function RED_LIGHT_SOFT(isAlt) { return isAlt ? 'FEE2E2' : 'FEF2F2'; }
+
+  const moneyStyle = (tipo) => ({
+    numFmt: '$#,##0.00',
+    font:   { name: 'Calibri', size: 10, bold: true,
+              color: { argb: 'FF' + (tipo === 'Ingreso' ? C.TEXT_GREEN : tipo === 'Egreso' ? C.TEXT_RED : C.TEXT_DARK) } },
+    alignment: { horizontal: 'right', vertical: 'middle' },
+    fill:  { type: 'pattern', pattern: 'solid',
+             fgColor: { argb: 'FF' + (tipo === 'Ingreso' ? C.GREEN_MED : tipo === 'Egreso' ? 'FEE2E2' : C.WHITE) } },
+  });
+  const totalRowStyle = {
+    fill:      { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + C.TOTAL_BG } },
+    font:      { bold: true, name: 'Calibri', size: 11, color: { argb: 'FF' + C.TOTAL_FONT } },
+    alignment: { vertical: 'middle' },
+    border:    { top: { style: 'medium', color: { argb: 'FF' + C.TEXT_DARK } } },
+  };
+
+  const applyAutoFilter = (ws, lastCol) => {
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: lastCol } };
+  };
+  const freezeTopRow = (ws) => { ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 1 }]; };
+
+  // ── Crear workbook ────────────────────────────────────────────────
+  const ExcelJS_  = typeof ExcelJS !== 'undefined' ? ExcelJS : null;
+  if (!ExcelJS_) {
+    // Fallback a XLSX si ExcelJS no cargó
+    _exportConsolidadoFallback();
+    return;
+  }
+
+  const wb  = new ExcelJS_.Workbook();
+  wb.creator = 'FinDash · SMTO';
+  wb.created = new Date();
+
+  const bancos = [...new Set(finalDataset2.map(r => r.banco))].sort();
+
+  // ── HOJA: Concentrado ─────────────────────────────────────────────
+  const wsConc = wb.addWorksheet('Concentrado');
+  wsConc.columns = [
+    { header: 'Fecha',          key: 'fecha',    width: 13 },
+    { header: 'Año',            key: 'anio',     width: 7  },
+    { header: 'Mes',            key: 'mes',      width: 12 },
+    { header: 'Hoja',           key: 'hoja',     width: 22 },
+    { header: 'Banco',          key: 'banco',    width: 14 },
+    { header: 'Tipo de Cuenta', key: 'tipo',     width: 18 },
+    { header: 'Moneda',         key: 'moneda',   width: 8  },
+    { header: 'Descripción',    key: 'desc',     width: 55 },
+    { header: 'Monto',          key: 'monto',    width: 16 },
+    { header: 'Tipo',           key: 'tipoReg',  width: 10 },
+  ];
+  applyHeader(wsConc.getRow(1));
+  applyAutoFilter(wsConc, 10);
+  freezeTopRow(wsConc);
+
+  finalDataset2.forEach((r, ri) => {
+    const isAlt  = ri % 2 === 0;
+    const tipo   = r.tipo_registro;
+    const anio   = r.fecha ? r.fecha.getFullYear() : null;
+    const mesNum = r.fecha ? r.fecha.getMonth() : null;
+    const mesNom = mesNum != null ? MONTHS_LONG[mesNum] : '';
+    const row = wsConc.addRow({
+      fecha:   r.fecha || null,
+      anio:    anio,
+      mes:     mesNom,
+      hoja:    r.hoja, banco: r.banco, tipo: r.tipo_cuenta, moneda: r.moneda,
+      desc:    r.descripcion || r.descripcion_corta || '',
+      monto:   r.monto, tipoReg: tipo,
+    });
+    // Fecha como fecha real
+    if (r.fecha) { row.getCell('fecha').numFmt = 'dd/mm/yyyy'; row.getCell('fecha').value = r.fecha; }
+    // Monto con color
+    const montoCell = row.getCell('monto');
+    montoCell.numFmt = '$#,##0.00';
+    montoCell.font   = { bold: true, name: 'Calibri', size: 10,
+                         color: { argb: 'FF' + (tipo === 'Ingreso' ? C.TEXT_GREEN : C.TEXT_RED) } };
+    // Fondo de fila
+    const bg = tipo === 'Ingreso' ? C.GREEN_MED : tipo === 'Egreso' ? 'FEE2E2' : (isAlt ? C.GREY_LIGHT : C.WHITE);
+    row.eachCell(cell => {
+      if (!cell.fill || cell.fill.fgColor?.argb === 'FF' + C.WHITE) {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + bg } };
+      }
+    });
+    row.height = 16;
+  });
+
+  // ── HOJAS POR BANCO ───────────────────────────────────────────────
+  for (const banco of bancos) {
+    const bRows = finalDataset2.filter(r => r.banco === banco);
+    const wsB   = wb.addWorksheet(banco.substring(0, 31));
+    wsB.columns = [
+      { header: 'Fecha',       key: 'fecha',  width: 13 },
+      { header: 'Año',         key: 'anio',   width: 7  },
+      { header: 'Mes',         key: 'mes',    width: 12 },
+      { header: 'Hoja',        key: 'hoja',   width: 22 },
+      { header: 'Tipo Cuenta', key: 'tipo',   width: 18 },
+      { header: 'Moneda',      key: 'moneda', width: 8  },
+      { header: 'Descripción', key: 'desc',   width: 55 },
+      { header: 'Ingreso',     key: 'ing',    width: 16 },
+      { header: 'Egreso',      key: 'egr',    width: 16 },
+    ];
+    applyHeader(wsB.getRow(1));
+    applyAutoFilter(wsB, 9);
+    freezeTopRow(wsB);
+
+    bRows.forEach((r, ri) => {
+      const isAlt  = ri % 2 === 0;
+      const tipo   = r.tipo_registro;
+      const anio   = r.fecha ? r.fecha.getFullYear() : null;
+      const mesNum = r.fecha ? r.fecha.getMonth() : null;
+      const row = wsB.addRow({
+        fecha:  r.fecha || null,
+        anio:   anio,
+        mes:    mesNum != null ? MONTHS_LONG[mesNum] : '',
+        hoja:   r.hoja, tipo: r.tipo_cuenta, moneda: r.moneda,
+        desc:   r.descripcion || r.descripcion_corta || '',
+        ing:    tipo === 'Ingreso' ? r.monto : null,
+        egr:    tipo === 'Egreso'  ? r.monto : null,
+      });
+      if (r.fecha) { row.getCell('fecha').numFmt = 'dd/mm/yyyy'; row.getCell('fecha').value = r.fecha; }
+      ['ing','egr'].forEach(k => {
+        const c = row.getCell(k);
+        if (c.value) {
+          c.numFmt = '$#,##0.00';
+          c.font   = { bold: true, name: 'Calibri', size: 10,
+                       color: { argb: 'FF' + (k === 'ing' ? C.TEXT_GREEN : C.TEXT_RED) } };
+        }
+      });
+      const bg = tipo === 'Ingreso' ? C.GREEN_MED : tipo === 'Egreso' ? 'FEE2E2' : (isAlt ? C.GREY_LIGHT : C.WHITE);
+      row.eachCell(cell => {
+        cell.fill = cell.fill?.type === 'pattern' && cell.fill.fgColor?.argb !== 'FFFFFFFF'
+          ? cell.fill
+          : { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + bg } };
+      });
+      row.height = 16;
+    });
+
+    // Totales al final de cada hoja de banco
+    const sumI = bRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
+    const sumE = bRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
+    const totRow = wsB.addRow({ desc: 'TOTAL', ing: sumI, egr: sumE });
+    totRow.height = 18;
+    totRow.eachCell(cell => Object.assign(cell.style, totalRowStyle));
+    totRow.getCell('ing').numFmt = '$#,##0.00';
+    totRow.getCell('egr').numFmt = '$#,##0.00';
+  }
+
+  // ── HOJA: Resumen por institución ────────────────────────────────
+  const wsRes = wb.addWorksheet('Resumen');
+  wsRes.columns = [
+    { header: 'Institución',    key: 'banco',  width: 18 },
+    { header: 'Total Ingresos', key: 'ing',    width: 18 },
+    { header: 'Total Egresos',  key: 'egr',    width: 18 },
+    { header: 'Balance Neto',   key: 'bal',    width: 18 },
+    { header: 'Movimientos',    key: 'movs',   width: 14 },
+  ];
+  applyHeader(wsRes.getRow(1));
+  applyAutoFilter(wsRes, 5);
+  freezeTopRow(wsRes);
+
+  let sumRI = 0, sumRE = 0;
+  bancos.forEach((banco, bi) => {
+    const bRows = finalDataset2.filter(r => r.banco === banco);
+    const i     = bRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
+    const e     = bRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
+    sumRI += i; sumRE += e;
+    const row = wsRes.addRow({ banco, ing: i, egr: e, bal: i - e, movs: bRows.length });
+    const bg  = bi % 2 === 0 ? C.GREY_LIGHT : C.WHITE;
+    row.eachCell(cell => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + bg } }; });
+    ['ing','egr','bal'].forEach(k => {
+      const c = row.getCell(k);
+      c.numFmt = '$#,##0.00';
+      c.font   = { bold: true, name: 'Calibri', size: 10, color: { argb: 'FF' + (k === 'ing' ? C.TEXT_GREEN : k === 'egr' ? C.TEXT_RED : (c.value >= 0 ? C.TEXT_GREEN : C.TEXT_RED)) } };
+    });
+    row.height = 17;
+  });
+  const totRes = wsRes.addRow({ banco: 'TOTAL GENERAL', ing: sumRI, egr: sumRE, bal: sumRI - sumRE, movs: finalDataset2.length });
+  totRes.height = 20;
+  totRes.eachCell(cell => Object.assign(cell.style, totalRowStyle));
+  ['ing','egr','bal'].forEach(k => { totRes.getCell(k).numFmt = '$#,##0.00'; });
+
+  // ── Descargar ────────────────────────────────────────────────────
+  const fecha   = new Date().toISOString().slice(0, 10);
+  const buffer  = await wb.xlsx.writeBuffer();
+  const blob    = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url     = URL.createObjectURL(blob);
+  const a       = document.createElement('a');
+  a.href        = url;
+  a.download    = `Concentrado_SMTO_${fecha}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+
+/** Fallback con SheetJS básico si ExcelJS no está disponible. */
+function _exportConsolidadoFallback() {
+  const wb = XLSX.utils.book_new();
+  const bancos = [...new Set(finalDataset2.map(r => r.banco))].sort();
   const concentrado = [
-    ['Fecha', 'Hoja', 'Banco', 'Tipo de Cuenta', 'Moneda', 'Descripción', 'Monto', 'Tipo'],
+    ['Fecha', 'Año', 'Mes', 'Hoja', 'Banco', 'Tipo de Cuenta', 'Moneda', 'Descripción', 'Monto', 'Tipo'],
     ...finalDataset2.map(r => [
-      r.fecha ? r.fecha.toLocaleDateString('es-MX') : 'Sin fecha',
+      r.fecha || 'Sin fecha',
+      r.fecha ? r.fecha.getFullYear() : '',
+      r.fecha ? MONTHS_LONG[r.fecha.getMonth()] : '',
       r.hoja, r.banco, r.tipo_cuenta, r.moneda,
-      r.descripcion, r.monto, r.tipo_registro,
+      r.descripcion || r.descripcion_corta || '', r.monto, r.tipo_registro,
     ]),
   ];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(concentrado), 'Concentrado');
-
-  // ── Hojas por banco ──
-  const bancos = [...new Set(finalDataset2.map(r => r.banco))].sort();
+  const ws = XLSX.utils.aoa_to_sheet(concentrado);
+  // Marcar columna A como fecha
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  for (let R = 1; R <= range.e.r; R++) {
+    const cell = ws[XLSX.utils.encode_cell({ r: R, c: 0 })];
+    if (cell && cell.v instanceof Date) { cell.t = 'd'; cell.z = 'dd/mm/yyyy'; }
+  }
+  XLSX.utils.book_append_sheet(wb, ws, 'Concentrado');
   for (const banco of bancos) {
     const bRows = finalDataset2.filter(r => r.banco === banco);
     const data  = [
-      ['Fecha', 'Hoja', 'Tipo de Cuenta', 'Moneda', 'Descripción', 'Monto', 'Tipo'],
+      ['Fecha','Año','Mes','Hoja','Tipo','Moneda','Descripción','Ingreso','Egreso'],
       ...bRows.map(r => [
-        r.fecha ? r.fecha.toLocaleDateString('es-MX') : 'Sin fecha',
-        r.hoja, r.tipo_cuenta, r.moneda, r.descripcion, r.monto, r.tipo_registro,
+        r.fecha || '', r.fecha ? r.fecha.getFullYear() : '',
+        r.fecha ? MONTHS_LONG[r.fecha.getMonth()] : '',
+        r.hoja, r.tipo_cuenta, r.moneda,
+        r.descripcion || '', r.tipo_registro === 'Ingreso' ? r.monto : '',
+        r.tipo_registro === 'Egreso' ? r.monto : '',
       ]),
     ];
-    // Nombre de hoja: máximo 31 chars (límite Excel)
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), banco.substring(0, 31));
   }
-
-  // ── Hoja Resumen (totales por banco) ──
-  const resumen = [
-    ['Institución', 'Total Ingresos', 'Total Egresos', 'Balance Neto', 'Movimientos'],
-    ...bancos.map(banco => {
-      const bRows = finalDataset2.filter(r => r.banco === banco);
-      const i     = bRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
-      const e     = bRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
-      return [banco, i, e, i - e, bRows.length];
-    }),
-  ];
-  const totalI = finalDataset2.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
-  const totalE = finalDataset2.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
-  resumen.push(['TOTAL GENERAL', totalI, totalE, totalI - totalE, finalDataset2.length]);
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumen), 'Resumen');
-
-  const fecha = new Date().toISOString().slice(0, 10);
-  XLSX.writeFile(wb, `Concentrado_SMTO_${fecha}.xlsx`);
+  XLSX.writeFile(wb, `Concentrado_SMTO_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 // ─── ETAPA 4: DASHBOARDS POR HOJA ────────────────────────────────
@@ -2504,19 +2722,12 @@ function renderAllSheetDashboards() {
     const btn  = document.createElement('button');
     btn.className     = 'sheet-tab-btn' + (i === 0 ? ' active' : '');
     btn.dataset.sheet = name;
-    btn.title         = 'Click: alternar selección · Ctrl+Click: añadir a selección múltiple';
+    btn.title         = 'Click para seleccionar/deseleccionar · Selecciona varias para ver suma combinada';
     btn.innerHTML     = `
       <span class="sheet-tab-name" title="${escHtml(name)}">${escHtml(name)}</span>
       <span class="sheet-tab-moneda sheet-pill-moneda-${meta.moneda}">${meta.moneda}</span>`;
-    btn.addEventListener('click', (e) => {
-      if (e.ctrlKey || e.metaKey) {
-        // Ctrl/Cmd+Click: toggle sin limpiar selección actual
-        toggleSheetTab(name);
-      } else {
-        // Click normal: seleccionar solo esta hoja
-        selectOnlySheet(name);
-      }
-    });
+    // UN solo click = toggle (sin necesidad de Ctrl)
+    btn.addEventListener('click', () => toggleSheetTab(name));
     tabsNav.appendChild(btn);
   });
 
@@ -2770,7 +2981,7 @@ function buildSheetDashboardHTML(sheetName, idx) {
         <span class="table-badge" id="sheet-tbl-badge-${idx}">${rows.length.toLocaleString('es-MX')} registros</span>
       </div>
 
-      <!-- Tabla con sticky header y filtros por columna -->
+      <!-- Tabla con sticky header -->
       <div class="table-wrapper tx-table-wrapper sheet-tx-wrap" id="twrap-${idx}">
         <table class="data-table sheet-detail-table" id="sheet-table-${idx}">
           <thead>
@@ -2786,9 +2997,11 @@ function buildSheetDashboardHTML(sheetName, idx) {
           <tbody id="sheet-tbody-${idx}">
             <tr><td colspan="6" class="tx-empty">Cargando…</td></tr>
           </tbody>
-          <tfoot id="sheet-tfoot-${idx}"></tfoot>
         </table>
       </div>
+
+      <!-- Totales FUERA del scroll (no se enciman) -->
+      <div class="sheet-totals-bar" id="sheet-totals-${idx}"></div>
 
       <!-- Paneles de filtro por columna (position:fixed via JS) -->
       ${colPanels}
@@ -3003,35 +3216,34 @@ function renderSheetKPIs2(sheetName, idx, filteredRows) {
     `${filteredRows.length.toLocaleString('es-MX')} de ${totalRows.length.toLocaleString('es-MX')} movimientos`;
 }
 
-/** Renderiza tbody + tfoot con totales dinámicos. */
+/** Renderiza tbody y barra de totales externos (no sticky, no encima). */
 function renderSheetTableBody2(sheetName, idx, rows) {
-  const tbody = document.getElementById(`sheet-tbody-${idx}`);
-  const tfoot = document.getElementById(`sheet-tfoot-${idx}`);
-  const badge = document.getElementById(`sheet-tbl-badge-${idx}`);
+  const tbody   = document.getElementById(`sheet-tbody-${idx}`);
+  const totBar  = document.getElementById(`sheet-totals-${idx}`);
+  const badge   = document.getElementById(`sheet-tbl-badge-${idx}`);
   if (!tbody) return;
 
   if (badge) badge.textContent = `${rows.length.toLocaleString('es-MX')} registros`;
 
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="6" class="tx-empty">Sin resultados para los filtros seleccionados</td></tr>`;
-    if (tfoot) tfoot.innerHTML = '';
+    if (totBar) totBar.innerHTML = '';
     return;
   }
 
-  // Límite de filas en DOM para rendimiento (datasets grandes → usar filtros)
-  const MAX_ROWS = 2000;
+  // Límite de filas en DOM para rendimiento
+  const MAX_ROWS    = 2000;
   const displayRows = rows.slice(0, MAX_ROWS);
   const truncated   = rows.length > MAX_ROWS;
 
-  // Renderizar las filas visibles
   tbody.innerHTML = displayRows.map(r => {
-    const isIng = r.tipo_registro === 'Ingreso';
-    const fechaStr   = r.fecha ? formatDate(r.fecha) : '—';
-    const descCorta  = escHtml(r.descripcion_corta || '');
-    const factStr    = escHtml(r.factura || '');
-    const concStr    = escHtml(r.concepto || r.descripcion || '');
-    const ingStr     = isIng ? formatMoney(r.monto) : '';
-    const egrStr     = isIng ? '' : formatMoney(r.monto);
+    const isIng    = r.tipo_registro === 'Ingreso';
+    const fechaStr = r.fecha ? formatDate(r.fecha) : '—';
+    const descCorta = escHtml(r.descripcion_corta || '');
+    const factStr   = escHtml(r.factura || '');
+    const concStr   = escHtml(r.concepto || r.descripcion || '');
+    const ingStr    = isIng ? formatMoney(r.monto) : '';
+    const egrStr    = isIng ? '' : formatMoney(r.monto);
     return `<tr>
       <td class="td-date">${fechaStr}</td>
       <td class="td-nombre">${descCorta}</td>
@@ -3042,35 +3254,32 @@ function renderSheetTableBody2(sheetName, idx, rows) {
     </tr>`;
   }).join('');
 
-  // Nota de truncado si hay más filas que el límite
   if (truncated) {
     tbody.innerHTML += `<tr><td colspan="6" class="tx-truncate-note">
       ⚠ Mostrando primeros ${MAX_ROWS.toLocaleString('es-MX')} de ${rows.length.toLocaleString('es-MX')} registros.
-      Usa los filtros de año, mes o búsqueda para ver registros específicos.
+      Aplica filtros para acotar los resultados.
     </td></tr>`;
   }
 
-  // ── Footer con totales dinámicos (sobre TODOS los rows filtrados, no solo los visibles) ──
+  // ── Totales en barra EXTERIOR al scroll ────────────────────────
   const totalIng = rows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
   const totalEgr = rows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
   const balance  = totalIng - totalEgr;
   const balColor = balance >= 0 ? 'var(--income)' : 'var(--expense)';
 
-  if (tfoot) {
-    tfoot.innerHTML = `
-      <tr class="tfoot-totals">
-        <td colspan="4">
-          <strong>TOTALES — ${rows.length.toLocaleString('es-MX')} movimientos</strong>
-        </td>
-        <td class="text-right td-total-inc"><strong>${formatMoney(totalIng)}</strong></td>
-        <td class="text-right td-total-egr"><strong>${formatMoney(totalEgr)}</strong></td>
-      </tr>
-      <tr class="tfoot-balance">
-        <td colspan="4"><strong>BALANCE NETO</strong></td>
-        <td colspan="2" class="text-right" style="color:${balColor}">
-          <strong>${formatMoney(balance)}</strong>
-        </td>
-      </tr>`;
+  if (totBar) {
+    totBar.innerHTML = `
+      <div class="totals-row totals-main">
+        <span class="totals-label">TOTALES · ${rows.length.toLocaleString('es-MX')} movimientos</span>
+        <span class="totals-spacer"></span>
+        <span class="totals-ing">${formatMoney(totalIng)}</span>
+        <span class="totals-egr">${formatMoney(totalEgr)}</span>
+      </div>
+      <div class="totals-row totals-balance">
+        <span class="totals-label">BALANCE NETO</span>
+        <span class="totals-spacer"></span>
+        <span class="totals-bal" style="color:${balColor}">${formatMoney(balance)}</span>
+      </div>`;
   }
 }
 
